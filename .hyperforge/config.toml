@@ -1,4 +1,4 @@
-org = "hypermemetic"
+org = "hypermemetic-ai"
 forges = [
     "codeberg",
     "github",
