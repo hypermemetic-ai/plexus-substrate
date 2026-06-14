@@ -44,6 +44,29 @@ This "chronological bubbling" helps prioritize recent architectural decisions.
 
 See `docs/architecture/16676565123400000000_plexus-rpc-ecosystem-naming.md` for complete strategy.
 
+## Driving substrate via synapse (real usage)
+
+substrate runs on **:4444** and registers as **`substrate`**. Drive it with the `synapse` CLI — **synapse is a normal CLI; every parameter is its own `--flag`** (you do NOT pass a `-p '{json}'` blob). Navigate `synapse [global-flags] substrate <activation> <method> --param value`. Full grammar lives in the synapse skill (`../skills/skills/synapse/SKILL.md`); this is substrate's concrete surface.
+
+Activations: **arbor** (tree/node store), **bash** (command execution), **changelog**, **claudecode** (Claude Code sessions).
+
+```bash
+# discover what's exposed — let the backend tell you the shape
+synapse -i substrate                          # full method map (irMethods keys: arbor.*, bash.*, …)
+synapse substrate bash execute                # bare call → prints this method's --flags + docs
+synapse substrate bash execute --help         # same, as help text
+
+# real calls — each param is a flag (kebab-case)
+synapse -j substrate bash execute --command "ls -la"
+synapse -j substrate arbor tree_list
+synapse -j substrate arbor tree_get   --tree-id <UUID>
+synapse -j substrate arbor node_create_text --tree-id <UUID> --parent-id <UUID> --text "…"
+```
+
+- **Global flags before `substrate`** (`-j` raw JSON, `-i` IR map, `-s` schema, `-P 4444` to bypass a stale registry entry); **method `--params` after the method.**
+- List-valued params repeat the flag (`--tags a --tags b`); a param whose value is a nested JSON object takes it inline (`--meta '{"k":"v"}'`). Everything else is a plain `--flag value`.
+- Responses stream as newline-delimited `{"type":"data",…}` envelopes ending in `{"type":"done"}`; pipe through `jq`/python to parse.
+
 ## Key Architecture Documents
 
 - **Plexus RPC Ecosystem Naming** (`docs/architecture/16676565123400000000_plexus-rpc-ecosystem-naming.md`): Complete naming strategy for the Plexus RPC ecosystem. Covers protocol naming, library naming, codegen tools, and migration path.
