@@ -152,15 +152,23 @@ async fn main() -> anyhow::Result<()> {
             let module = DynamicHub::arc_into_rpc_module(hub.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to create RPC module: {e}"))?;
             let hub_route = hub.clone();
-            let route_fn: RouteFn = Arc::new(move |method, params| {
+            // PLX-28: transport's RouteFn went 4-arg in PLX-16/17 (per-user AuthContext +
+            // RawRequestContext threading). Forward both into route_with_ctx so identity
+            // and origin context reach the hub when a gateway supplies them.
+            let route_fn: RouteFn = Arc::new(move |method, params, auth, raw_ctx| {
                 let hub = hub_route.clone();
-                Box::pin(async move { hub.route(&method, params, None).await })
+                Box::pin(async move {
+                    hub.route_with_ctx(&method, params, auth.as_deref(), raw_ctx.as_ref())
+                        .await
+                })
             });
             let addr: std::net::SocketAddr = format!("127.0.0.1:{}", args.port).parse()?;
             tracing::info!("Substrate Plexus RPC server started");
             tracing::info!("  WebSocket: ws://127.0.0.1:{}", args.port);
             tracing::info!("  MCP HTTP:  http://127.0.0.1:{}/mcp", args.port);
-            let handle = serve_combined(module, hub, Some(flat_schemas), Some(route_fn), addr, args.api_key, false).await?;
+            // PLX-28: serve_combined grew a session_validator param (PLX-17). None preserves
+            // substrate's existing behavior — no per-user validator is wired today.
+            let handle = serve_combined(module, hub, Some(flat_schemas), Some(route_fn), addr, args.api_key, false, None).await?;
             handle.stopped().await;
             Ok(())
         }
