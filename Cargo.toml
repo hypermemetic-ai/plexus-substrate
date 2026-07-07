@@ -66,11 +66,11 @@ cllient = "0.2.1"
 # guard — the same pattern the already-migrated plexus-rpc / plexus-registry use.
 # registry bumps 0.1 -> 0.2 (path) so it too resolves onto core 0.6; a
 # crates.io registry 0.1 would drag in core 0.5 and create a dual-core hazard.
-plexus-macros = { path = "../../plexus-macros", version = "0.6" }
-plexus-core = { path = "../../plexus-core", version = "0.6" }
-plexus-transport = { path = "../../plexus-transport", version = "0.4", features = ["mcp-gateway"] }
+plexus-macros = { path = "../plexus-macros", version = "0.6" }
+plexus-core = { path = "../plexus-core", version = "0.6" }
+plexus-transport = { path = "../plexus-transport", version = "0.4", features = ["mcp-gateway"] }
 # plexus-jsexec = "0.1.0"  # temporarily disabled - needs API updates
-registry = { package = "plexus-registry", path = "../../plexus-registry", version = "0.2" }
+registry = { package = "plexus-registry", path = "../plexus-registry", version = "0.2" }
 
 # Mustache templating
 mustache = "0.9"
