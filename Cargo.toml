@@ -61,11 +61,16 @@ dialectic = { version = "0.4.1", features = ["tokio"] }
 # MCP server via rmcp
 rmcp = { version = "0.12", features = ["server", "transport-io", "transport-streamable-http-server"] }
 cllient = "0.2.1"
-plexus-macros = "0.5"
-plexus-core = "0.5"
-plexus-transport = { version = "0.2", features = ["mcp-gateway"] }
+# PLX-9: lift to the 0.6 framework generation. 0.6 is UNPUBLISHED (crates.io
+# tops out at plexus-core 0.5.3), so these are sibling path deps with a version
+# guard — the same pattern the already-migrated plexus-rpc / plexus-registry use.
+# registry bumps 0.1 -> 0.2 (path) so it too resolves onto core 0.6; a
+# crates.io registry 0.1 would drag in core 0.5 and create a dual-core hazard.
+plexus-macros = { path = "../../plexus-macros", version = "0.6" }
+plexus-core = { path = "../../plexus-core", version = "0.6" }
+plexus-transport = { path = "../../plexus-transport", version = "0.4", features = ["mcp-gateway"] }
 # plexus-jsexec = "0.1.0"  # temporarily disabled - needs API updates
-registry = { package = "plexus-registry", version = "0.1.0" }
+registry = { package = "plexus-registry", path = "../../plexus-registry", version = "0.2" }
 
 # Mustache templating
 mustache = "0.9"

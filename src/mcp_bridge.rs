@@ -86,6 +86,12 @@ fn plexus_to_mcp_error(e: PlexusError) -> McpError {
         PlexusError::Unauthenticated(reason) => {
             McpError::invalid_params(format!("Unauthenticated: {reason}"), None)
         }
+        // core 0.6 (AUTHZ): authenticated-but-not-authorized. PlexusError's
+        // Display renders the layered reason ("Forbidden: missing required
+        // scope '…'" / "tenant boundary" / "call not accepted").
+        forbidden @ PlexusError::Forbidden { .. } => {
+            McpError::invalid_params(forbidden.to_string(), None)
+        }
     }
 }
 
