@@ -130,7 +130,7 @@ impl Activation for Health {
         }
     }
 
-    async fn call(&self, method: &str, params: Value, _auth: Option<&plexus_core::plexus::AuthContext>, _raw_ctx: Option<&plexus_core::request::RawRequestContext>) -> Result<PlexusStream, PlexusError> { match method {
+    async fn call(&self, method: &str, _params: Value, _auth: Option<&plexus_core::plexus::AuthContext>, _raw_ctx: Option<&plexus_core::request::RawRequestContext>) -> Result<PlexusStream, PlexusError> { match method {
         "check" => {
             let stream = self.check_stream();
             Ok(wrap_stream(stream, "health.status", vec!["health".into()]))
@@ -138,27 +138,10 @@ impl Activation for Health {
         "schema" => {
             use crate::plexus::SchemaResult;
     
-            // Check if a specific method was requested
-            let method_name: Option<String> = params.get("method")
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string);
-    
-            let plugin_schema = self.plugin_schema();
-    
-            let result = if let Some(ref name) = method_name {
-                // Find the specific method
-                plugin_schema.methods.iter()
-                    .find(|m| m.name == *name)
-                    .map(|m| SchemaResult::Method(m.clone()))
-                    .ok_or_else(|| PlexusError::MethodNotFound {
-                        activation: "health".to_string(),
-                        method: name.clone(),
-                    })?
-            } else {
-                // Return full plugin schema
-                SchemaResult::Plugin(plugin_schema)
-            };
-    
+            // PROT schema unification (PLX-13): `.schema` always yields the single
+            // unified PluginSchema; no `method`-param per-method branch.
+            let result = SchemaResult::Plugin(self.plugin_schema());
+
             Ok(wrap_stream(
                 futures::stream::once(async move { result }),
                 "health.schema",
@@ -166,22 +149,9 @@ impl Activation for Health {
             ))
         }
         _ => {
-            // Check for {method}.schema pattern (e.g., "check.schema")
-            // Only if the prefix is an actual local method
-            if let Some(method_name) = method.strip_suffix(".schema") {
-                use crate::plexus::SchemaResult;
-    
-                let plugin_schema = self.plugin_schema();
-                if let Some(m) = plugin_schema.methods.iter().find(|m| m.name == method_name) {
-                    let result = SchemaResult::Method(m.clone());
-                    return Ok(wrap_stream(
-                        futures::stream::once(async move { result }),
-                        "health.method_schema",
-                        vec!["health".into()]
-                    ));
-                }
-            }
-    
+            // PROT schema unification (PLX-13): the `{method}.schema` strip-suffix
+            // shortcut (and its `.method_schema` content-type) is deleted; an
+            // unknown method is method-not-found.
             Err(PlexusError::MethodNotFound {
                 activation: "health".to_string(),
                 method: method.to_string(),
