@@ -248,28 +248,11 @@ impl Activation for CelestialBodyActivation {
         "schema" => {
             use crate::plexus::SchemaResult;
     
-            // Check if a specific method was requested
-            let method_name: Option<String> = params.get("method")
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string);
-    
-            let plugin_schema = self.plugin_schema();
+            // PROT schema unification (PLX-13): `.schema` always yields the single
+            // unified PluginSchema; no `method`-param per-method branch.
             let ns = self.namespace.clone();
-    
-            let result = if let Some(ref name) = method_name {
-                // Find the specific method
-                plugin_schema.methods.iter()
-                    .find(|m| m.name == *name)
-                    .map(|m| SchemaResult::Method(m.clone()))
-                    .ok_or_else(|| PlexusError::MethodNotFound {
-                        activation: ns.clone(),
-                        method: name.clone(),
-                    })?
-            } else {
-                // Return full plugin schema
-                SchemaResult::Plugin(plugin_schema)
-            };
-    
+            let result = SchemaResult::Plugin(self.plugin_schema());
+
             Ok(wrap_stream(
                 futures::stream::once(async move { result }),
                 "celestial.schema",
@@ -277,24 +260,9 @@ impl Activation for CelestialBodyActivation {
             ))
         }
         _ => {
-            // Check for {method}.schema pattern (e.g., "info.schema")
-            // Only if the prefix is an actual local method (not a child)
-            if let Some(method_name) = method.strip_suffix(".schema") {
-                use crate::plexus::SchemaResult;
-    
-                let plugin_schema = self.plugin_schema();
-                if let Some(m) = plugin_schema.methods.iter().find(|m| m.name == method_name) {
-                    let ns = self.namespace.clone();
-                    let result = SchemaResult::Method(m.clone());
-                    return Ok(wrap_stream(
-                        futures::stream::once(async move { result }),
-                        "celestial.method_schema",
-                        vec![ns]
-                    ));
-                }
-                // Not a local method - fall through to child routing
-            }
-    
+            // PROT schema unification (PLX-13): the `{method}.schema` strip-suffix
+            // shortcut (and its `.method_schema` content-type) is deleted; an
+            // unknown method falls straight through to child routing.
             // Try routing to child
             crate::plexus::route_to_child(self, method, params, None, None).await
         }
