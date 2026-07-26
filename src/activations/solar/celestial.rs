@@ -195,6 +195,56 @@ impl CelestialBodyActivation {
         Self { body, namespace }
     }
 
+    /// The vNext IR contract for this activation — hand-authored, deliberately.
+    ///
+    /// PLX-106. `Solar` declares `#[plexus_macros::child(list = "body_names")]`,
+    /// and that attribute emits `<CelestialBodyActivation>::__plexus_activation_ir()`
+    /// into `Solar`'s own IR constructor (`plexus-macros/src/ir_parse/emit.rs`,
+    /// `child_edge_expr`, the `ChildEdgeSpec::Dynamic` arm). Every activation
+    /// that participates in a `#[child]` edge must therefore expose this
+    /// associated function. `#[plexus_macros::activation]` normally emits it
+    /// (`plexus-macros/src/codegen/mod.rs`, `activation_ir_fn`).
+    ///
+    /// # Why this one is hand-authored rather than macro-generated
+    ///
+    /// A celestial body's children are celestial bodies: `ChildRouter::get_child`
+    /// below returns another `CelestialBodyActivation`. Expressing that with
+    /// `#[plexus_macros::child]` would emit
+    /// `<CelestialBodyActivation>::__plexus_activation_ir()?` *inside*
+    /// `CelestialBodyActivation::__plexus_activation_ir()` — unbounded
+    /// self-recursion. A finite IR document cannot embed a self-recursive
+    /// subtree, and the macro has no cycle break.
+    ///
+    /// The macro's documented escape hatch for "keep my hand-written
+    /// `ChildRouter`" is `#[plexus_macros::activation(hub, ...)]`, which skips
+    /// `ChildRouter` generation (`plexus-macros/src/codegen/activation.rs`, the
+    /// `hub_explicit && child_methods.is_empty()` gate). That flag is
+    /// `#[deprecated]` as of IR-5 and substrate sets `warnings = "deny"`
+    /// (`Cargo.toml`, `[lints.rust]`), so taking it would reintroduce the
+    /// module-level `#![allow(deprecated)]` that `solar/activation.rs`
+    /// documents as removed. Hand-authoring the IR is the supported
+    /// alternative (`plexus-macros/src/ir_parse/emit.rs` header, and the
+    /// `Session` fixture in `plexus-macros/tests/plx79_ir_parse_tests.rs`).
+    ///
+    /// The bodies below are never executed — `activation_ir!` reads signatures
+    /// only and discards bodies. Dispatch stays on the hand-written
+    /// `impl Activation` beneath.
+    #[doc(hidden)]
+    #[allow(non_snake_case)]
+    pub(crate) fn __plexus_activation_ir(
+    ) -> Result<plexus_core::ir::ActivationIr, plexus_core::ir::SchemaRefError> {
+        plexus_macros::activation_ir!(
+            namespace = "celestial",
+            version = "1.0.0",
+            description = "A celestial body observed as a plugin",
+            impl CelestialBodyActivation {
+                /// Get information about this celestial body.
+                #[method]
+                async fn info(&self) -> impl Stream<Item = SolarEvent> + Send + 'static;
+            }
+        )
+    }
+
     fn info_stream(&self) -> impl Stream<Item = SolarEvent> + Send + 'static {
         let body = self.body.clone();
         stream! {

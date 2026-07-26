@@ -13,7 +13,7 @@ use super::types::{ConfirmEvent, DeleteEvent, WizardEvent};
 use async_stream::stream;
 use futures::Stream;
 use plexus_core::plexus::bidirectional::{
-    bidir_error_message, BidirChannel, BidirError, SelectOption, StandardRequest, StandardResponse,
+    bidir_error_message, BidirError, SelectOption, StandardBidirChannel,
 };
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ impl Interactive {
     #[plexus_macros::method(bidirectional, streaming)]
     async fn wizard(
         &self,
-        ctx: &Arc<BidirChannel<StandardRequest, StandardResponse>>,
+        ctx: &Arc<StandardBidirChannel>,
     ) -> impl Stream<Item = WizardEvent> + Send + 'static {
         let ctx = ctx.clone();
         stream! {
@@ -134,7 +134,7 @@ impl Interactive {
     #[plexus_macros::method(bidirectional, streaming)]
     async fn delete(
         &self,
-        ctx: &Arc<BidirChannel<StandardRequest, StandardResponse>>,
+        ctx: &Arc<StandardBidirChannel>,
         paths: Vec<String>,
     ) -> impl Stream<Item = DeleteEvent> + Send + 'static {
         let ctx = ctx.clone();
@@ -180,7 +180,7 @@ impl Interactive {
     #[plexus_macros::method(bidirectional)]
     async fn confirm(
         &self,
-        ctx: &Arc<BidirChannel<StandardRequest, StandardResponse>>,
+        ctx: &Arc<StandardBidirChannel>,
         message: String,
     ) -> impl Stream<Item = ConfirmEvent> + Send + 'static {
         let ctx = ctx.clone();
