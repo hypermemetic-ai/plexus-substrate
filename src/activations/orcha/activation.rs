@@ -2558,7 +2558,9 @@ mod plx133_yield_once_tests {
     /// Build a real `Orcha` over throwaway SQLite files. Every dependency is
     /// touched only on the success path, so the working-directory failure path
     /// exercises the ordering and nothing else.
-    async fn create_test_orcha() -> super::Orcha {
+    // PLX-150 reuses this helper from a sibling test module rather than
+    // standing up a second copy of the same six-storage wiring.
+    pub(super) async fn create_test_orcha() -> super::Orcha {
         use crate::activations::arbor::{Arbor, ArborConfig};
         use crate::activations::claudecode::{ClaudeCode, ClaudeCodeStorage, ClaudeCodeStorageConfig};
         use crate::activations::claudecode_loopback::{ClaudeCodeLoopback, LoopbackStorageConfig};
@@ -2686,5 +2688,208 @@ mod plx133_yield_once_tests {
             !items.iter().any(|e| matches!(e, OrchaEvent::GraphStarted { .. })),
             "GraphStarted must not be emitted for a run that cannot start"
         );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLX-150 — the advertised child hash
+//
+// `plexus-macros` synthesizes `plugin_children()` from static `#[child]`
+// methods whenever an activation does not hand-write one. Until PLX-150 that
+// synthesis wrote `hash: String::new()`, so `orcha` advertised its `pm` child
+// as `{"namespace":"pm","hash":""}` while `orcha.pm.schema` self-reported a
+// real digest. PLX-143 measured it on a live wire: 22 of 23 advertised hashes
+// agreed with the child's self-report, and this was the one that did not.
+// Synapse's cache looks up on the advertised hash and inserted on the fetched
+// one, so `orcha.pm` was permanently uncacheable, silently, forever.
+//
+// These tests are written against the REAL activation, not a fixture built to
+// pass them: they construct `Orcha` over throwaway SQLite the same way the
+// PLX-133 tests do, and read the schema the macro actually emits.
+// ═══════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+#[allow(deprecated)] // `PluginSchema::children` is the wire field under test.
+mod plx150_child_hash_tests {
+    use crate::plexus::Activation;
+
+    /// Rebuild a real `Orcha`. Kept separate from the PLX-133 helper so a
+    /// change to either test's needs cannot silently alter the other's.
+    async fn create_test_orcha() -> super::Orcha {
+        super::plx133_yield_once_tests::create_test_orcha().await
+    }
+
+    /// PLX-150 c2 — orcha's advertised hash for `pm` equals `pm`'s own.
+    #[tokio::test]
+    async fn orcha_advertises_pms_real_hash() {
+        let orcha = create_test_orcha().await;
+        let schema = orcha.plugin_schema();
+
+        let children = schema
+            .children
+            .as_ref()
+            .expect("orcha is a hub: the synthesized plugin_children populates children");
+        let pm_edge = children
+            .iter()
+            .find(|c| c.namespace == "pm")
+            .expect("orcha advertises a `pm` child");
+
+        // The child's own self-report — the exact value `orcha.pm.schema`
+        // returns over the wire.
+        let pm_self_reported = orcha.pm().plugin_schema().hash;
+
+        println!("PLX-150 advertised orcha.pm hash = {:?}", pm_edge.hash);
+        println!("PLX-150 pm self-reported hash    = {:?}", pm_self_reported);
+
+        assert!(
+            !pm_edge.hash.is_empty(),
+            "RFC 002 §5.1: a child edge MUST advertise a hash. An empty string is \
+             not a hash — it is a value that decodes cleanly and can never match, \
+             which is why this went unnoticed for the whole life of the emitter"
+        );
+        assert_eq!(
+            pm_edge.hash, pm_self_reported,
+            "the advertised hash must be the hash the child reports when fetched, \
+             or synapse's cache looks up under one key and inserts under another"
+        );
+    }
+
+    /// PLX-150 c1 — the general rule, over the same real activation: no
+    /// synthesized child edge may advertise an empty hash.
+    #[tokio::test]
+    async fn no_synthesized_child_edge_advertises_an_empty_hash() {
+        let orcha = create_test_orcha().await;
+        let schema = orcha.plugin_schema();
+        let children = schema.children.as_ref().expect("children populated");
+        assert!(!children.is_empty(), "orcha has at least one static child");
+        for c in children {
+            assert!(
+                !c.hash.is_empty(),
+                "child edge `{}` advertises an empty hash",
+                c.namespace
+            );
+        }
+    }
+
+    /// PLX-150 c4 — the hashes that must NOT move.
+    ///
+    /// Fixing the child edge necessarily moves `children_hash` and therefore
+    /// the composite `hash` — that is the entire point, and it is what makes
+    /// `orcha.pm` cacheable. What must not move is the *method* surface:
+    /// every `MethodSchema.hash`, and `self_hash`, which is folded from them.
+    /// `compute_method_hash` reads name, description, params and return types
+    /// and nothing else, so this is a real invariant rather than a restatement.
+    ///
+    /// The constants are the values measured on the pristine tree at
+    /// `20378c09` (plexus-substrate) / `f7f3217` (plexus-macros), printed by
+    /// `plx150_print_orcha_hashes` below.
+    #[tokio::test]
+    async fn no_method_or_activation_self_hash_moves() {
+        let orcha = create_test_orcha().await;
+        let schema = orcha.plugin_schema();
+
+        let mut got: Vec<(String, String)> = schema
+            .methods
+            .iter()
+            .map(|m| (m.name.clone(), m.hash.clone()))
+            .collect();
+        got.sort();
+
+        let mut expected: Vec<(String, String)> = PRISTINE_ORCHA_METHOD_HASHES
+            .iter()
+            .map(|(n, h)| (n.to_string(), h.to_string()))
+            .collect();
+        expected.sort();
+
+        assert_eq!(
+            got, expected,
+            "no method hash may move: PLX-150 changes only the advertised child \
+             edge, and a method hash is computed from the signature alone"
+        );
+        assert_eq!(
+            schema.self_hash, PRISTINE_ORCHA_SELF_HASH,
+            "self_hash folds method hashes only, so it must not move either"
+        );
+    }
+
+    /// Measured on the pristine tree before the PLX-150 emitter fix
+    /// (plexus-substrate `20378c09`, plexus-macros `f7f3217`).
+    ///
+    /// What DID move, by design: `children_hash` 30406ea523c53def →
+    /// a3634ae63c24599a and the composite `hash` 08d2e4926c1a2e9a →
+    /// 98623e6322c2a1db, because the `pm` edge went from `""` to
+    /// `50bfa7415dec30dd` — the exact digest PLX-143 measured `orcha.pm.schema`
+    /// self-reporting on a live wire. That movement is the fix.
+    ///
+    /// RESIDUAL, deliberately left: the `pm` entry in the table below has an
+    /// empty METHOD hash. `codegen::method_enum` emits
+    /// `MethodSchema::new(name, desc, String::new())` for every `#[child]`
+    /// method entry. Populating it would move `self_hash` and every composite
+    /// above it, which PLX-150 forbids, so it needs its own ticket. It is a
+    /// different field from the `ChildSummary.hash` this build fixed.
+    const PRISTINE_ORCHA_SELF_HASH: &str = "6bc477dd91593d89";
+    const PRISTINE_ORCHA_METHOD_HASHES: &[(&str, &str)] = &[
+    ("add_dependency", "1b6d7af224ce8d3c"),
+    ("add_gather_node", "bb4edb17394c26cd"),
+    ("add_subgraph_node", "a18a7c7543cfd6fc"),
+    ("add_synthesize_node", "b3ff08b6332e4caf"),
+    ("add_task_node", "d37855c258c3c6ca"),
+    ("add_validate_node", "a15939d2a9edc8dd"),
+    ("approve_request", "cadde8f32dfe4386"),
+    ("build_tickets", "c73fa5307a4a0ea9"),
+    ("cancel_graph", "43a2728c06c7ecd4"),
+    ("check_status", "f76240e6179905b8"),
+    ("create_graph", "6123aced7b18622c"),
+    ("create_session", "385a6428ade54a40"),
+    ("delete_session", "c86bd4ca9289075b"),
+    ("deny_request", "e3240d6fcdf29cea"),
+    ("extract_validation", "53d8aa1d93494ff7"),
+    ("get_agent", "ab742b28e3d655c0"),
+    ("get_session", "de2870311e795d26"),
+    ("increment_retry", "e9597d8be116b88f"),
+    ("list_agents", "3f96460d9490da3c"),
+    ("list_monitor_trees", "df99bc8b66874bbd"),
+    ("list_pending_approvals", "901309883979da7a"),
+    ("list_sessions", "6cc1615294569d53"),
+    ("pm", ""),
+    ("run_graph", "ca68f148e7775b89"),
+    ("run_graph_definition", "6277c7c14a3165ee"),
+    ("run_plan", "ff9844113a09bd91"),
+    ("run_task", "ed13c5936ffeab7b"),
+    ("run_task_async", "9ca58e0ee0380c04"),
+    ("run_tickets", "e3be6ef6640ffdaf"),
+    ("run_tickets_async", "16ef14d9c184f4ff"),
+    ("run_tickets_async_files", "b815f73a186a83b3"),
+    ("run_tickets_files", "f7a712bbc321107a"),
+    ("run_validation", "0d838c48dea1633e"),
+    ("schema", "auto_schema"),
+    ("spawn_agent", "e728864ec52896bd"),
+    ("subscribe_approvals", "98055bc241e32959"),
+    ("subscribe_graph", "464891cba7b5fab9"),
+    ("update_session_state", "93e7b4faf0013600"),
+    ("watch_graph_tree", "108cda24351724a9"),
+    ];
+
+    /// Prints the values the two constants above are pinned to. Run with
+    /// `--ignored --nocapture` to re-measure.
+    #[tokio::test]
+    #[ignore]
+    async fn plx150_print_orcha_hashes() {
+        let orcha = create_test_orcha().await;
+        let schema = orcha.plugin_schema();
+        println!("SELF_HASH = {:?}", schema.self_hash);
+        println!("CHILDREN_HASH = {:?}", schema.children_hash);
+        println!("COMPOSITE = {:?}", schema.hash);
+        println!("METHOD_HASHES = &[");
+        let mut ms: Vec<_> = schema.methods.iter().collect();
+        ms.sort_by(|a, b| a.name.cmp(&b.name));
+        for m in ms {
+            println!("    ({:?}, {:?}),", m.name, m.hash);
+        }
+        println!("];");
+        if let Some(kids) = schema.children.as_ref() {
+            for c in kids {
+                println!("CHILD {:?} hash = {:?}", c.namespace, c.hash);
+            }
+        }
     }
 }
