@@ -18,6 +18,18 @@ path = "src/main.rs"
 name = "mcp-gateway"
 path = "src/bin/mcp_gateway.rs"
 
+# PLX-140 (ACP·F). A real binary rather than an example so that
+# `tests/acp_claudecode.rs` can reach it through
+# `env!("CARGO_BIN_EXE_acp-stdio")` and spawn it as an actual subprocess over
+# actual pipes — which is criterion c1, and is not something an in-process test
+# can stand in for. `test = false` follows PLX-136's rule: the binary holds no
+# `#[test]`, so a test target for it would report "0 passed" beside the real
+# suites and read as a green nothing.
+[[bin]]
+name = "acp-stdio"
+path = "src/bin/acp_stdio.rs"
+test = false
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -84,6 +96,8 @@ plexus-sandbox = { path = "../plexus-sandbox", version = "0.1" }
 # above plexus-core; idp does not depend on substrate), so this is the caller
 # taking the obligation, not the dependency inversion those tickets refused.
 plexus-idp = { path = "../plexus-idp", version = "0.1" }
+# PLX-140 (ACP·F): the ACP vocabulary, runtime and stdio transport.
+plexus-acp = { path = "../plexus-acp", version = "0.1", features = ["stdio"] }
 # plexus-jsexec = "0.1.0"  # temporarily disabled - needs API updates
 registry = { package = "plexus-registry", path = "../plexus-registry", version = "0.2" }
 
