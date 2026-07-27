@@ -481,6 +481,13 @@ pub struct SubstrateActivations {
 /// inside a mount.
 pub fn compose_host_hub(a: &SubstrateActivations) -> DynamicHub {
     let hub = DynamicHub::new("substrate")
+        // PLX-157 — RFC 002 §3.3 / §7.6 root facts. `backend_name` is the name
+        // this backend registers under and answers `_info` with, so a client
+        // that has the document no longer has to probe for it; `respond_method`
+        // is the reply channel the runtime actually registers (`{ns}.respond`),
+        // which is what §7.6 asks a consumer to be able to see before invoking.
+        .with_backend_name("substrate")
+        .with_respond_method("substrate.respond")
         .register(Health::new())
         .register(Echo::new())
         .register(Bash::new());
@@ -552,6 +559,11 @@ pub fn compose_tenant_hub_confined(
     //           so the cargo feature cannot re-admit it into a tenant.
     // EXCLUDED: `orcha` (A3/A4/B1) — no `.register(a.orcha)`.
     let hub = DynamicHub::new("substrate")
+        // PLX-157 — same root facts as the host surface. A tenant's document
+        // must answer §3.3/§7.6 too; the reply channel is namespaced on the
+        // hub root, which is `substrate` here as well.
+        .with_backend_name("substrate")
+        .with_respond_method("substrate.respond")
         .register(Health::new())
         .register(Echo::new())
         .register(a.arbor.clone())
