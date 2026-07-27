@@ -105,11 +105,21 @@ impl Lattice {
     /// The stream closes when `GraphDone` or `GraphFailed` is emitted.
     ///
     /// PLX-118: this is the one lattice method that genuinely multi-shots, so it
-    /// keeps `impl Stream`. It does **not** declare `streaming` and that is left
-    /// exactly as found — the flag drives `MethodSchema` and therefore
-    /// plexus-transport's SSE-vs-JSON decision (PLX-107), so adding it here
-    /// would change routing behaviour, which PLX-118's T3 forbids.
-    #[plexus_macros::method(params(
+    /// keeps `impl Stream`. PLX-118's T3 forbade touching the `streaming` flag
+    /// because it drives `MethodSchema` and therefore plexus-transport's
+    /// SSE-vs-JSON decision (PLX-107).
+    ///
+    /// PLX-133 item 6 DECIDES it: the flag is declared. `after_seq` is a
+    /// *reconnect cursor* — a concept that only exists if the connection stays
+    /// open — so serving this method as one buffered JSON document made its own
+    /// parameter meaningless and put a whole graph's event history under
+    /// `collect_and_respond`'s 10,000-item / 100 MB cap. **Wire consequence**:
+    /// over the HTTP gateway `lattice.execute` now answers
+    /// `text/event-stream` instead of `application/json`, delivered
+    /// incrementally rather than as one body at the end. In-process callers
+    /// (orcha's graph_runner) and the MCP gateway are unaffected — the MCP
+    /// bridge never reads this flag.
+    #[plexus_macros::method(streaming, params(
         graph_id = "ID of the graph to execute",
         after_seq = "Cursor for reconnect replay — omit for fresh start, or pass last received seq"
     ))]

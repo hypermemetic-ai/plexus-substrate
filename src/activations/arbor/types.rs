@@ -599,10 +599,6 @@ pub enum ArborEvent {
         end_node: NodeId,
         content: crate::activations::arbor::RangeContent,
     },
-
-    // Error
-    #[serde(rename = "error")]
-    Err { message: String },
 }
 
 // ============================================================================

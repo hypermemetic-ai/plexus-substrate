@@ -1,5 +1,5 @@
 use crate::activations::arbor::ArborStorage;
-use crate::activations::claudecode::{ChatEvent, ClaudeCode, CreateResult, Model};
+use crate::activations::claudecode::{ChatEvent, ClaudeCode, Model};
 use crate::activations::claudecode_loopback::LoopbackStorage;
 use crate::activations::lattice::{LatticeEvent, LatticeEventEnvelope, NodeOutput, NodeSpec, Token, TokenPayload};
 use async_stream::stream;
@@ -376,19 +376,12 @@ async fn dispatch_task(
         }
     });
 
-    let create_stream = claudecode
+    if let Err(e) = claudecode
         .create(session_name.clone(), working_directory, model, None, Some(true), Some(graph_id.to_string()))
-        .await;
-    tokio::pin!(create_stream);
-
-    if let Some(result) = create_stream.next().await {
-        match result {
-            CreateResult::Ok { .. } => {}
-            CreateResult::Err { message } => {
-                let _ = approver_stop_tx.send(());
-                return Err(format!("Failed to create claudecode session: {message}"));
-            }
-        }
+        .await
+    {
+        let _ = approver_stop_tx.send(());
+        return Err(format!("Failed to create claudecode session: {e}"));
     }
 
     let chat_stream = claudecode.chat(session_name, prompt, None, None).await;

@@ -95,8 +95,19 @@ impl Echo {
     /// code, the message and the structured `details` payload.
     ///
     /// `MethodSchema.streaming` is untouched: it was never declared for `ping`
-    /// and it is still false, so plexus-transport keeps serving this method as
-    /// JSON exactly as before (PLX-107's contract).
+    /// and it is still false, so plexus-transport still **routes** this method to
+    /// JSON, exactly as before (PLX-107's contract).
+    ///
+    /// PLX-133 item 7 — **routing is the only thing that is "exactly as before".
+    /// The body changed.** An earlier revision of this comment said transport
+    /// serves `ping` "exactly as before" without that qualifier, and it was read
+    /// as a claim of body equivalence, which it never was. Under the old shape
+    /// the turn projected one update plus an empty terminal, so the HTTP body was
+    /// `{"data":[payload, {"stop":…,"value":null}]}`. Under the unary arm it is
+    /// `{"data":[{"stop":…,"value":payload}]}` — the array is one element shorter
+    /// and the payload has moved inside `stop.value`. See the "Wire compatibility"
+    /// section of the crate README; this holds for all 86 methods M2 converted,
+    /// not only `ping`.
     #[plexus_macros::method(description = "Ping — returns a Pong response")]
     async fn ping(&self) -> Result<EchoEvent, plexus_core::runtime::TurnError> {
         Ok(EchoEvent::Pong)

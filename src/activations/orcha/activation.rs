@@ -702,28 +702,16 @@ impl Orcha {
             let summary_session_id = format!("{}-check-{}", session_id, Uuid::new_v4());
 
             // Create the session - using Haiku for fast, cheap summaries
-            let create_stream = claudecode.create(
+            claudecode.create(
                 summary_session.clone(),
                 "/workspace".to_string(), // Default, doesn't matter for ephemeral
                 crate::activations::claudecode::Model::Haiku,
                 None,
                 Some(false), // No loopback needed for summary
                 Some(summary_session_id), // Track ephemeral session under parent
-            ).await;
-            tokio::pin!(create_stream);
-
-            let mut create_ok = false;
-            while let Some(result) = create_stream.next().await {
-                if let crate::activations::claudecode::CreateResult::Ok { .. } = result {
-                    create_ok = true;
-                }
-            }
-
-            if !create_ok {
-                return Err(OrchaError::OrchestrationError {
-                    detail: "Failed to create summary session".to_string(),
-                });
-            }
+            ).await.map_err(|e| OrchaError::OrchestrationError {
+                detail: format!("Failed to create summary session: {e}"),
+            })?;
 
             // Ask Claude to summarize the session with actual context
             let prompt = if let Some(conversation) = conversation_context {
@@ -840,29 +828,16 @@ impl Orcha {
             let cc_session_name = format!("orcha-agent-{}", Uuid::new_v4());
             let agent_session_id = format!("{}-agent-{}", session.session_id, Uuid::new_v4());
 
-            let create_stream = claudecode.create(
+            claudecode.create(
                 cc_session_name.clone(),
                 "/workspace".to_string(),  // TODO: Get from session
                 model,
                 None,
                 Some(true), // Loopback enabled
                 Some(agent_session_id), // Track agent under parent session
-            ).await;
-            tokio::pin!(create_stream);
-
-            let mut create_ok = false;
-            while let Some(result) = create_stream.next().await {
-                if let crate::activations::claudecode::CreateResult::Ok { .. } = result {
-                    create_ok = true;
-                    break;
-                }
-            }
-
-            if !create_ok {
-                return Err(OrchaError::OrchestrationError {
-                    detail: "Failed to create ClaudeCode session".to_string(),
-                });
-            }
+            ).await.map_err(|e| OrchaError::OrchestrationError {
+                detail: format!("Failed to create ClaudeCode session: {e}"),
+            })?;
 
             // Create agent record
             let agent = storage.create_agent(
@@ -1633,6 +1608,25 @@ impl Orcha {
             };
             let model_str = model.as_deref().unwrap_or("sonnet").to_string();
             let wd = working_directory.unwrap_or_else(|| "/workspace".to_string());
+
+            // PLX-133 item 2 — this check used to sit *after* `yield GraphStarted`,
+            // so a bad working directory produced two items (`GraphStarted` then
+            // `Failed`) while every other failure path produced one. Moving it here
+            // matches `run_tickets_async`, which had it in this order all along and
+            // is why the asymmetry was visible at all. Behaviour change, on purpose:
+            // a bad `working_directory` now fails *before* the lattice graph is
+            // built, so no graph_id is allocated and no ticket map is persisted.
+            if !std::path::Path::new(&wd).is_dir() {
+                yield OrchaEvent::Failed {
+                    session_id: "tickets".to_string(),
+                    error: format!(
+                        "Working directory does not exist: '{wd}'. \
+                         Create it before running tickets or pass an existing path."
+                    ),
+                };
+                return;
+            }
+
             let mut enriched_metadata = if metadata.is_object() {
                 metadata.clone()
             } else {
@@ -1664,20 +1658,6 @@ impl Orcha {
                 "haiku" => Model::Haiku,
                 _ => Model::Sonnet,
             };
-
-            // Validate working directory early — before the graph starts executing —
-            // so the caller gets a clear error instead of every node failing with an
-            // opaque Claude CLI exit message.
-            if !std::path::Path::new(&wd).is_dir() {
-                yield OrchaEvent::Failed {
-                    session_id: "tickets".to_string(),
-                    error: format!(
-                        "Working directory does not exist: '{wd}'. \
-                         Create it before running tickets or pass an existing path."
-                    ),
-                };
-                return;
-            }
 
             // Build a node_id → ticket_id map from id_map (which is ticket_id → node_id).
             let node_to_ticket: std::collections::HashMap<String, String> = id_map
@@ -1998,6 +1978,20 @@ impl Orcha {
             };
             let model_str = model.as_deref().unwrap_or("sonnet").to_string();
             let wd = working_directory.unwrap_or_else(|| "/workspace".to_string());
+
+            // PLX-133 item 2 — see `run_tickets`. Same double-yield, same fix: the
+            // check moves above `yield GraphStarted` so this method fails exactly
+            // once on every path. Behaviour change, on purpose: a bad
+            // `working_directory` now fails before the lattice graph is built, so no
+            // graph_id is allocated and no ticket map is persisted.
+            if !std::path::Path::new(&wd).is_dir() {
+                yield OrchaEvent::Failed {
+                    session_id: "tickets".to_string(),
+                    error: format!("Working directory does not exist: '{wd}'"),
+                };
+                return;
+            }
+
             let mut enriched_metadata = if metadata.is_object() { metadata.clone() } else { serde_json::json!({}) };
             enriched_metadata["_plexus_run_config"] = serde_json::json!({
                 "model": model_str,
@@ -2022,13 +2016,6 @@ impl Orcha {
                 "haiku" => Model::Haiku,
                 _ => Model::Sonnet,
             };
-            if !std::path::Path::new(&wd).is_dir() {
-                yield OrchaEvent::Failed {
-                    session_id: "tickets".to_string(),
-                    error: format!("Working directory does not exist: '{wd}'"),
-                };
-                return;
-            }
             let node_to_ticket: std::collections::HashMap<String, String> = id_map
                 .iter().map(|(t, n)| (n.clone(), t.clone())).collect();
             let graph = Arc::new(graph_runtime.open_graph(graph_id.clone()));
@@ -2453,28 +2440,14 @@ async fn generate_agent_summary(
     let summary_session = format!("orcha-agent-summary-{}", Uuid::new_v4());
     let summary_session_id = format!("{}-agent-summary-{}", agent.session_id, Uuid::new_v4());
 
-    let create_stream = claudecode.create(
+    claudecode.create(
         summary_session.clone(),
         "/workspace".to_string(),
         crate::activations::claudecode::Model::Haiku,
         None,
         Some(false),
         Some(summary_session_id), // Track ephemeral summary session
-    ).await;
-    tokio::pin!(create_stream);
-
-    // Wait for creation
-    let mut created = false;
-    while let Some(result) = create_stream.next().await {
-        if let crate::activations::claudecode::CreateResult::Ok { .. } = result {
-            created = true;
-            break;
-        }
-    }
-
-    if !created {
-        return Err("Failed to create summary session".to_string());
-    }
+    ).await.map_err(|e| format!("Failed to create summary session: {e}"))?;
 
     // Ask for summary
     let prompt = format!(
@@ -2518,25 +2491,15 @@ async fn generate_overall_summary(
     let meta_summary_session_id = format!("{}-meta-summary-{}", session_id, Uuid::new_v4());
 
     // Create session
-    let create_stream = claudecode.create(
+    if let Err(e) = claudecode.create(
         summary_session.clone(),
         "/workspace".to_string(),
         crate::activations::claudecode::Model::Haiku,
         None,
         Some(false),
         Some(meta_summary_session_id), // Track meta-summary under parent session
-    ).await;
-    tokio::pin!(create_stream);
-
-    let mut created = false;
-    while let Some(result) = create_stream.next().await {
-        if let crate::activations::claudecode::CreateResult::Ok { .. } = result {
-            created = true;
-            break;
-        }
-    }
-
-    if !created {
+    ).await {
+        tracing::warn!("Failed to create meta-summary session: {e}");
         return None;
     }
 
@@ -2572,4 +2535,156 @@ async fn generate_overall_summary(
     }
 
     Some(summary)
+}
+
+#[cfg(test)]
+mod plx133_yield_once_tests {
+    use super::*;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PLX-133 item 2 — "fail exactly once on every path"
+    //
+    // `run_tickets` and `run_tickets_async_files` used to `yield GraphStarted`
+    // *before* validating `working_directory`, so a nonexistent directory produced
+    // two items where every other failure path produced one. `run_tickets_async`
+    // had the check in the right order all along, which is what exposed the
+    // asymmetry. These tests drive the failure path and count.
+    //
+    // They assert the reordered behaviour deliberately: the single item is
+    // `Failed`, and `GraphStarted` never appears — which also means no graph_id was
+    // allocated for a run that cannot start.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Build a real `Orcha` over throwaway SQLite files. Every dependency is
+    /// touched only on the success path, so the working-directory failure path
+    /// exercises the ordering and nothing else.
+    async fn create_test_orcha() -> super::Orcha {
+        use crate::activations::arbor::{Arbor, ArborConfig};
+        use crate::activations::claudecode::{ClaudeCode, ClaudeCodeStorage, ClaudeCodeStorageConfig};
+        use crate::activations::claudecode_loopback::{ClaudeCodeLoopback, LoopbackStorageConfig};
+        use crate::activations::lattice::{Lattice, LatticeStorageConfig};
+        use crate::activations::orcha::pm::{Pm, PmStorage, PmStorageConfig};
+        use crate::activations::orcha::{GraphRuntime, OrchaStorage, OrchaStorageConfig};
+
+        let dir = std::env::temp_dir().join(format!("orcha_plx133_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let arbor = Arbor::new(ArborConfig {
+            db_path: dir.join("arbor.db"),
+            auto_cleanup: false,
+            ..ArborConfig::default()
+        })
+        .await
+        .expect("arbor");
+        let arbor_storage = arbor.storage();
+
+        let claudecode_storage = ClaudeCodeStorage::new(
+            ClaudeCodeStorageConfig { db_path: dir.join("claudecode.db") },
+            arbor_storage.clone(),
+        )
+        .await
+        .expect("claudecode storage");
+        let claudecode = Arc::new(ClaudeCode::with_context_type(Arc::new(claudecode_storage)));
+
+        let loopback = Arc::new(
+            ClaudeCodeLoopback::new(LoopbackStorageConfig { db_path: dir.join("loopback.db") })
+                .await
+                .expect("loopback"),
+        );
+
+        let lattice = Lattice::new(LatticeStorageConfig { db_path: dir.join("lattice.db") })
+            .await
+            .expect("lattice");
+        let graph_runtime = Arc::new(GraphRuntime::new(lattice.storage()));
+
+        let pm_storage = Arc::new(
+            PmStorage::new(PmStorageConfig { db_path: dir.join("pm.db") })
+                .await
+                .expect("pm storage"),
+        );
+        let pm = Arc::new(Pm::new(pm_storage, lattice.storage()));
+
+        let orcha_storage = Arc::new(
+            OrchaStorage::new(OrchaStorageConfig { db_path: dir.join("orcha.db") })
+                .await
+                .expect("orcha storage"),
+        );
+
+        super::Orcha::new(orcha_storage, claudecode, loopback, arbor_storage, graph_runtime, pm)
+    }
+
+    /// A ticket file that compiles cleanly, so the only thing that can fail is the
+    /// working-directory check.
+    const ONE_VALID_TICKET: &str = "--- t1 [agent]\ntask: do nothing\n";
+
+    fn nonexistent_dir() -> String {
+        format!("/tmp/plx133-does-not-exist-{}", uuid::Uuid::new_v4())
+    }
+
+    #[tokio::test]
+    async fn plx133_run_tickets_fails_exactly_once_on_a_bad_working_directory() {
+        use futures::StreamExt;
+
+        let orcha = create_test_orcha().await;
+        let stream = orcha
+            .run_tickets(
+                ONE_VALID_TICKET.to_string(),
+                serde_json::json!({}),
+                Some("sonnet".to_string()),
+                Some(nonexistent_dir()),
+            )
+            .await;
+        let items: Vec<OrchaEvent> = stream.collect().await;
+
+        assert_eq!(
+            items.len(),
+            1,
+            "run_tickets must yield exactly one item on the bad-working-directory path, got {items:?}"
+        );
+        assert!(
+            matches!(items[0], OrchaEvent::Failed { .. }),
+            "the single item must be Failed, got {:?}",
+            items[0]
+        );
+        assert!(
+            !items.iter().any(|e| matches!(e, OrchaEvent::GraphStarted { .. })),
+            "GraphStarted must not be emitted for a run that cannot start"
+        );
+    }
+
+    #[tokio::test]
+    async fn plx133_run_tickets_async_files_fails_exactly_once_on_a_bad_working_directory() {
+        use futures::StreamExt;
+
+        let dir = std::env::temp_dir().join(format!("plx133_tickets_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let ticket_path = dir.join("one.md");
+        std::fs::write(&ticket_path, ONE_VALID_TICKET).expect("write ticket");
+
+        let orcha = create_test_orcha().await;
+        let stream = orcha
+            .run_tickets_async_files(
+                vec![ticket_path.to_string_lossy().into_owned()],
+                serde_json::json!({}),
+                Some("sonnet".to_string()),
+                Some(nonexistent_dir()),
+            )
+            .await;
+        let items: Vec<OrchaEvent> = stream.collect().await;
+
+        assert_eq!(
+            items.len(),
+            1,
+            "run_tickets_async_files must yield exactly one item on the bad-working-directory path, got {items:?}"
+        );
+        assert!(
+            matches!(items[0], OrchaEvent::Failed { .. }),
+            "the single item must be Failed, got {:?}",
+            items[0]
+        );
+        assert!(
+            !items.iter().any(|e| matches!(e, OrchaEvent::GraphStarted { .. })),
+            "GraphStarted must not be emitted for a run that cannot start"
+        );
+    }
 }

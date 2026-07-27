@@ -227,18 +227,6 @@ pub struct SubmitTaskRequest {
     pub task: String,
 }
 
-/// Result of submitting a task
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SubmitTaskResult {
-    Ok {
-        stream_id: String,
-    },
-    Err {
-        message: String,
-    },
-}
-
 /// Request to get session status
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GetSessionRequest {
@@ -251,16 +239,6 @@ pub struct RespondApprovalRequest {
     pub approval_id: String,
     pub approve: bool,
     pub message: Option<String>,
-}
-
-/// Result of responding to approval
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RespondApprovalResult {
-    Ok,
-    Err {
-        message: String,
-    },
 }
 
 /// Request to list pending approvals for a session

@@ -96,7 +96,7 @@ pub(super) async fn run_orchestration_task(
         // loopback_session_id will be set to cc_session_id after create() returns.
         // We pass None here and update storage directly after, since create() doesn't
         // know the cc_session_id until after the DB insert.
-        let create_stream = claudecode.create(
+        let created = claudecode.create(
             cc_session_name.clone(),
             request.working_directory.clone(),
             model,
@@ -104,43 +104,34 @@ pub(super) async fn run_orchestration_task(
             Some(true), // loopback_enabled
             None, // loopback_session_id set below after we have cc_session_id
         ).await;
-        tokio::pin!(create_stream);
 
-        let mut cc_session_id: Option<String> = None;
-        while let Some(result) = create_stream.next().await {
-            match result {
-                crate::activations::claudecode::CreateResult::Ok { id, .. } => {
-                    let id_str = id.to_string();
-                    // Use cc_session_id as the loopback session_id for MCP URL correlation.
-                    // Register the parent so Orcha notifiers fire when child approvals arrive.
-                    loopback.storage().register_session_parent(&id_str, &session_id);
-                    // Update the claudecode session's loopback_session_id
-                    let _ = claudecode.storage.session_update_loopback_id(&id, id_str.clone()).await;
-                    cc_session_id = Some(id_str.clone());
-                    ctx.claude_session_created(id_str, cc_session_name.clone()).await;
-                    if request.verbose {
-                        yield OrchaEvent::Progress {
-                            message: format!("Created Claude Code session: {id}"),
-                            percentage: Some(20.0),
-                        };
-                    }
-                }
-                crate::activations::claudecode::CreateResult::Err { message } => {
-                    yield OrchaEvent::Failed {
-                        session_id: session_id.clone(),
-                        error: format!("Failed to create Claude Code session: {message}"),
+        // PLX-133 item 1: `create` is a unary `Result` now, so there is no stream
+        // to pin and no "no response" third case to invent — the two outcomes are
+        // the two the method can produce.
+        let cc_session_id = match created {
+            Ok(crate::activations::claudecode::CreateOk { id, .. }) => {
+                let id_str = id.to_string();
+                // Use cc_session_id as the loopback session_id for MCP URL correlation.
+                // Register the parent so Orcha notifiers fire when child approvals arrive.
+                loopback.storage().register_session_parent(&id_str, &session_id);
+                // Update the claudecode session's loopback_session_id
+                let _ = claudecode.storage.session_update_loopback_id(&id, id_str.clone()).await;
+                ctx.claude_session_created(id_str.clone(), cc_session_name.clone()).await;
+                if request.verbose {
+                    yield OrchaEvent::Progress {
+                        message: format!("Created Claude Code session: {id}"),
+                        percentage: Some(20.0),
                     };
-                    return;
                 }
+                id_str
             }
-        }
-
-        let cc_session_id = if let Some(id) = cc_session_id { id } else {
-            yield OrchaEvent::Failed {
-                session_id: session_id.clone(),
-                error: "Failed to create Claude Code session: no response".to_string(),
-            };
-            return;
+            Err(e) => {
+                yield OrchaEvent::Failed {
+                    session_id: session_id.clone(),
+                    error: format!("Failed to create Claude Code session: {e}"),
+                };
+                return;
+            }
         };
 
         // Retry loop for validation failures
@@ -525,7 +516,7 @@ async fn handle_tool_approval(
     let decision_session = format!("orcha-approval-{}", uuid::Uuid::new_v4());
     let decision_session_id = format!("{}-approval-{}", orcha_session_id, uuid::Uuid::new_v4());
 
-    let create_stream = claudecode.create(
+    let created = claudecode.create(
         decision_session.clone(),
         "/workspace".to_string(),
         crate::activations::claudecode::Model::Haiku, // Fast decision with Haiku
@@ -533,19 +524,9 @@ async fn handle_tool_approval(
         Some(false), // No loopback for the decision agent
         Some(decision_session_id), // Track decision agent under parent session
     ).await;
-    tokio::pin!(create_stream);
 
-    // Wait for session creation
-    let mut created = false;
-    while let Some(result) = create_stream.next().await {
-        if let crate::activations::claudecode::CreateResult::Ok { .. } = result {
-            created = true;
-            break;
-        }
-    }
-
-    if !created {
-        tracing::error!("Failed to create approval decision session");
+    if let Err(e) = created {
+        tracing::error!("Failed to create approval decision session: {e}");
         // Auto-deny if we can't create decision session
         if let Err(e) = loopback.storage().resolve_approval(
             &approval_id,
@@ -932,8 +913,6 @@ async fn handle_agent_spawn_request(
     input: serde_json::Value,
     task_context: String,
 ) {
-    use futures::StreamExt;
-
     // Extract subtask from input
     let subtask = if let Some(s) = input.get("subtask").and_then(|v| v.as_str()) { s.to_string() } else {
         tracing::warn!("spawn_helper_agent called without subtask");
@@ -960,7 +939,7 @@ async fn handle_agent_spawn_request(
     // Create ClaudeCode session for this helper agent
     let cc_session_name = format!("orcha-agent-{}", Uuid::new_v4());
 
-    let create_stream = claudecode.create(
+    let created = claudecode.create(
         cc_session_name.clone(),
         "/workspace".to_string(), // TODO: Get from session
         model,
@@ -968,18 +947,9 @@ async fn handle_agent_spawn_request(
         Some(true), // Loopback enabled
         Some(session.session_id.clone()), // Use parent session_id for MCP URL transparency
     ).await;
-    tokio::pin!(create_stream);
 
-    let mut create_ok = false;
-    while let Some(result) = create_stream.next().await {
-        if let crate::activations::claudecode::CreateResult::Ok { .. } = result {
-            create_ok = true;
-            break;
-        }
-    }
-
-    if !create_ok {
-        tracing::error!("Failed to create claudecode session for helper agent");
+    if let Err(e) = created {
+        tracing::error!("Failed to create claudecode session for helper agent: {e}");
         return;
     }
 
