@@ -32,12 +32,12 @@ lattice node ids.
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `graph_status` | `graph_id: String, recursive: Option<bool>` | `Stream<Item=PmGraphStatusResult>` | Status of all tickets in a graph. When `recursive=true`, includes `child_graph_id` from completed SubGraph node outputs. |
-| `what_next` | `graph_id: String` | `Stream<Item=PmWhatNextResult>` | Tickets currently ready to execute (no unsatisfied dependencies). |
-| `inspect_ticket` | `graph_id: String, ticket_id: String` | `Stream<Item=PmInspectResult>` | Full detail for one ticket: kind, task/command, output, error, child-graph id. |
-| `why_blocked` | `graph_id: String, ticket_id: String` | `Stream<Item=PmWhyBlockedResult>` | List the tickets currently blocking `ticket_id` (or report `NotBlocked`). |
-| `get_ticket_source` | `graph_id: String` | `Stream<Item=Value>` | Raw ticket source text for a graph. |
-| `list_graphs` | `project: Option<String>, limit: Option<usize>, root_only: Option<bool>, status: Option<String>` | `Stream<Item=PmListGraphsResult>` | List graphs tracked by PM, filterable by `metadata.project`, `status`, and whether to include child graphs (`root_only` defaults to `true`, limit defaults to `20`). |
+| `graph_status` | `graph_id: String, recursive: Option<bool>` | `Result<PmGraphStatus, OrchaError>` | Status of all tickets in a graph. When `recursive=true`, includes `child_graph_id` from completed SubGraph node outputs. |
+| `what_next` | `graph_id: String` | `Result<PmWhatNext, OrchaError>` | Tickets currently ready to execute (no unsatisfied dependencies). |
+| `inspect_ticket` | `graph_id: String, ticket_id: String` | `Result<Option<PmTicketDetail>, OrchaError>` | Full detail for one ticket: kind, task/command, output, error, child-graph id. |
+| `why_blocked` | `graph_id: String, ticket_id: String` | `Result<PmBlockers, OrchaError>` | List the tickets currently blocking `ticket_id` (an empty `blocked_by` means not blocked). |
+| `get_ticket_source` | `graph_id: String` | `Result<Option<PmTicketSource>, OrchaError>` | Raw ticket source text for a graph. |
+| `list_graphs` | `project: Option<String>, limit: Option<usize>, root_only: Option<bool>, status: Option<String>` | `Result<Vec<PmGraphSummary>, OrchaError>` | List graphs tracked by PM, filterable by `metadata.project`, `status`, and whether to include child graphs (`root_only` defaults to `true`, limit defaults to `20`). |
 | `get_node_log` | `graph_id: String, node_id: String` | `Stream<Item=Value>` | Full execution log for a node — all events recorded by `dispatch_task` in sequence order. |
 
 ## Storage

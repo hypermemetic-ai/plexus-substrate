@@ -8,7 +8,16 @@ use thiserror::Error;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Structured error type for Orcha operations
-#[derive(Debug, Error)]
+///
+/// PLX-115: this is the single error type every unary Orcha (and Pm) method
+/// returns.  It is `Serialize` so that the whole typed value survives into
+/// [`TurnError::details`] instead of being flattened to a message — the
+/// property RFC 002 §6.7 requires and the reason the `From` impl below is the
+/// **only** place in this activation that constructs a `TurnError`.  PLX-114 is
+/// still deciding whether the envelope's `code` is a string or an integer; the
+/// fix, whichever way it lands, is this one function.
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrchaError {
     #[error("session not found: {session_id}")]
     SessionNotFound { session_id: String },
@@ -23,9 +32,41 @@ pub enum OrchaError {
     ValidationError { detail: String },
 }
 
+impl OrchaError {
+    /// The stable machine token a client branches on.
+    const fn code(&self) -> &'static str {
+        match self {
+            Self::SessionNotFound { .. } => "orcha.session_not_found",
+            Self::OrchestrationError { .. } => "orcha.orchestration_error",
+            Self::StorageError { .. } => "orcha.storage_error",
+            Self::ValidationError { .. } => "orcha.validation_error",
+        }
+    }
+
+    /// A storage failure, tagged with the operation that produced it.
+    pub fn storage(operation: &str, detail: impl std::fmt::Display) -> Self {
+        Self::StorageError {
+            operation: operation.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+}
+
 impl From<String> for OrchaError {
     fn from(detail: String) -> Self {
         OrchaError::OrchestrationError { detail }
+    }
+}
+
+/// The one and only bridge from Orcha's domain error to the turn envelope.
+///
+/// PLX-110's decision: `E: Into<TurnError>`, and `Err` terminates the turn with
+/// `StopKind::Failed`.  Nothing else in this activation builds a `TurnError`.
+impl From<OrchaError> for plexus_core::runtime::TurnError {
+    fn from(err: OrchaError) -> Self {
+        let code = err.code();
+        let message = err.to_string();
+        Self::structured(code, message, &err)
     }
 }
 
@@ -172,17 +213,11 @@ const fn default_max_retries() -> u32 {
     3
 }
 
-/// Result of creating a session
+/// A newly created session — the terminal value of `create_session`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CreateSessionResult {
-    Ok {
-        session_id: SessionId,
-        created_at: i64,
-    },
-    Err {
-        message: String,
-    },
+pub struct SessionCreated {
+    pub session_id: SessionId,
+    pub created_at: i64,
 }
 
 /// Request to submit a task to a session
@@ -208,18 +243,6 @@ pub enum SubmitTaskResult {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GetSessionRequest {
     pub session_id: SessionId,
-}
-
-/// Result of getting session status
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GetSessionResult {
-    Ok {
-        session: SessionInfo,
-    },
-    Err {
-        message: String,
-    },
 }
 
 /// Request to respond to an approval
@@ -257,18 +280,6 @@ pub struct ApprovalInfo {
     pub created_at: String, // ISO 8601 timestamp
 }
 
-/// Result of listing pending approvals
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ListApprovalsResult {
-    Ok {
-        approvals: Vec<ApprovalInfo>,
-    },
-    Err {
-        message: String,
-    },
-}
-
 /// Request to approve a pending request
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApproveRequest {
@@ -285,79 +296,20 @@ pub struct DenyRequest {
     pub reason: Option<String>,
 }
 
-/// Result of approving or denying a request
+/// The outcome of approving or denying a request — the terminal value of
+/// `approve_request` and `deny_request`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ApprovalActionResult {
-    Ok {
-        approval_id: String,
-        message: Option<String>,
-    },
-    Err {
-        message: String,
-    },
+pub struct ApprovalOutcome {
+    pub approval_id: String,
+    pub message: Option<String>,
 }
 
-/// Result of updating session state
+/// A session's retry counter after `increment_retry`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum UpdateSessionStateResult {
-    Ok,
-    Err {
-        message: String,
-    },
-}
-
-/// Result of extracting validation
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ExtractValidationResult {
-    Ok {
-        artifact: ValidationArtifact,
-    },
-    NotFound,
-}
-
-/// Result of running validation
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RunValidationResult {
-    Ok {
-        result: ValidationResult,
-    },
-}
-
-/// Result of incrementing retry counter
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum IncrementRetryResult {
-    Ok {
-        retry_count: u32,
-        max_retries: u32,
-        exceeded: bool,
-    },
-    Err {
-        message: String,
-    },
-}
-
-/// Result of listing sessions
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ListSessionsResult {
-    Ok {
-        sessions: Vec<SessionInfo>,
-    },
-}
-
-/// Result of deleting session
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum DeleteSessionResult {
-    Ok,
-    Err {
-        message: String,
-    },
+pub struct RetryStatus {
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub exceeded: bool,
 }
 
 /// Request to check status of a running session
@@ -366,40 +318,19 @@ pub struct CheckStatusRequest {
     pub session_id: SessionId,
 }
 
-/// Result of checking session status
+/// A session status summary — the terminal value of `check_status`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CheckStatusResult {
-    Ok {
-        summary: String,
-        /// Per-agent summaries (empty for single-agent mode)
-        #[serde(default)]
-        agent_summaries: Vec<AgentSummary>,
-    },
-    Err {
-        message: String,
-    },
+pub struct StatusSummary {
+    pub summary: String,
+    /// Per-agent summaries (empty for single-agent mode)
+    #[serde(default)]
+    pub agent_summaries: Vec<AgentSummary>,
 }
 
-/// Result of starting async task
+/// A reference to a session — the terminal value of `run_task_async`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RunTaskAsyncResult {
-    Ok {
-        session_id: SessionId,
-    },
-    Err {
-        message: String,
-    },
-}
-
-/// Result of listing monitor trees
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ListMonitorTreesResult {
-    Ok {
-        trees: Vec<MonitorTreeInfo>,
-    },
+pub struct SessionRef {
+    pub session_id: SessionId,
 }
 
 /// Information about a monitor tree
@@ -688,17 +619,11 @@ pub struct SpawnAgentRequest {
     pub parent_agent_id: Option<AgentId>,
 }
 
-/// Result of spawning an agent
+/// A newly spawned agent — the terminal value of `spawn_agent`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SpawnAgentResult {
-    Ok {
-        agent_id: AgentId,
-        claudecode_session_id: String,
-    },
-    Err {
-        message: String,
-    },
+pub struct SpawnedAgent {
+    pub agent_id: AgentId,
+    pub claudecode_session_id: String,
 }
 
 /// Request to list agents in a session
@@ -707,34 +632,10 @@ pub struct ListAgentsRequest {
     pub session_id: SessionId,
 }
 
-/// Result of listing agents
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ListAgentsResult {
-    Ok {
-        agents: Vec<AgentInfo>,
-    },
-    Err {
-        message: String,
-    },
-}
-
 /// Request to get specific agent info
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GetAgentRequest {
     pub agent_id: AgentId,
-}
-
-/// Result of getting agent info
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GetAgentResult {
-    Ok {
-        agent: AgentInfo,
-    },
-    Err {
-        message: String,
-    },
 }
 
 /// Summary of an individual agent's work
@@ -750,25 +651,17 @@ pub struct AgentSummary {
 // Graph Builder Result Types
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// A reference to a graph — the terminal value of `create_graph`,
+/// `build_tickets`, `run_tickets_async` and `cancel_graph`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum OrchaCreateGraphResult {
-    Ok { graph_id: String },
-    Err { message: String },
+pub struct GraphRef {
+    pub graph_id: String,
 }
 
+/// A reference to a node — the terminal value of the `add_*_node` methods.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum OrchaAddNodeResult {
-    Ok { node_id: String },
-    Err { message: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum OrchaAddDependencyResult {
-    Ok,
-    Err { message: String },
+pub struct NodeRef {
+    pub node_id: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

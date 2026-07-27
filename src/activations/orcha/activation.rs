@@ -4,7 +4,7 @@ use super::orchestrator::run_orchestration_task;
 use super::pm;
 use super::storage::OrchaStorage;
 use super::ticket_compiler;
-use super::types::{OrchaEvent, RunTaskRequest, CreateSessionRequest, CreateSessionResult, AgentMode, SessionId, SessionState, UpdateSessionStateResult, GetSessionRequest, GetSessionResult, ExtractValidationResult, ValidationArtifact, RunValidationResult, IncrementRetryResult, ListSessionsResult, DeleteSessionResult, RunTaskAsyncResult, ListMonitorTreesResult, MonitorTreeInfo, CheckStatusRequest, CheckStatusResult, AgentSummary, SpawnAgentRequest, SpawnAgentResult, ListAgentsRequest, ListAgentsResult, GetAgentRequest, GetAgentResult, ListApprovalsRequest, ListApprovalsResult, ApprovalInfo, ApproveRequest, ApprovalActionResult, DenyRequest, OrchaCreateGraphResult, OrchaAddNodeResult, GatherStrategy, OrchaAddDependencyResult, OrchaNodeDef, OrchaEdgeDef, OrchaNodeSpec, ValidationResult, AgentInfo};
+use super::types::{OrchaEvent, OrchaError, RunTaskRequest, CreateSessionRequest, SessionCreated, AgentMode, SessionId, SessionInfo, SessionState, GetSessionRequest, ValidationArtifact, RetryStatus, SessionRef, MonitorTreeInfo, CheckStatusRequest, StatusSummary, AgentSummary, SpawnAgentRequest, SpawnedAgent, ListAgentsRequest, GetAgentRequest, ListApprovalsRequest, ApprovalInfo, ApproveRequest, ApprovalOutcome, DenyRequest, GraphRef, NodeRef, GatherStrategy, OrchaNodeDef, OrchaEdgeDef, OrchaNodeSpec, ValidationResult, AgentInfo};
 use crate::activations::claudecode::{ClaudeCode, Model};
 use crate::activations::claudecode_loopback::ClaudeCodeLoopback;
 use crate::plexus::{HubContext, NoParent};
@@ -13,7 +13,6 @@ use futures::Stream;
 use futures::StreamExt;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -37,7 +36,6 @@ pub struct Orcha<P: HubContext = NoParent> {
     pm: Arc<pm::Pm>,
     /// Cancellation registry: `graph_id` → watch sender (true = cancel).
     cancel_registry: CancelRegistry,
-    _phantom: PhantomData<P>,
 }
 
 impl<P: HubContext> Orcha<P> {
@@ -58,7 +56,6 @@ impl<P: HubContext> Orcha<P> {
             graph_runtime,
             pm,
             cancel_registry: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            _phantom: PhantomData,
         }
     }
 
@@ -370,45 +367,32 @@ impl<P: HubContext> Orcha<P> {
     async fn create_session(
         &self,
         request: CreateSessionRequest,
-    ) -> impl Stream<Item = CreateSessionResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<SessionCreated, OrchaError> {
+        // Generate unique session ID
+        let session_id = format!("orcha-{}", Uuid::new_v4());
 
-        stream! {
-            // Generate unique session ID
-            let session_id = format!("orcha-{}", Uuid::new_v4());
+        // Determine agent mode
+        let agent_mode = if request.multi_agent {
+            AgentMode::Multi
+        } else {
+            AgentMode::Single
+        };
 
-            // Determine agent mode
-            let agent_mode = if request.multi_agent {
-                AgentMode::Multi
-            } else {
-                AgentMode::Single
-            };
+        // Create session in storage
+        let session = self.storage.create_session(
+            session_id.clone(),
+            request.model.clone(),
+            request.working_directory.clone(),
+            request.rules.clone(),
+            request.max_retries,
+            agent_mode,
+            None, // tree_id (created by run_orchestration_task)
+        ).await.map_err(|e| OrchaError::storage("create_session", e))?;
 
-            // Create session in storage
-            let session_result = storage.create_session(
-                session_id.clone(),
-                request.model.clone(),
-                request.working_directory.clone(),
-                request.rules.clone(),
-                request.max_retries,
-                agent_mode,
-                None, // tree_id (created by run_orchestration_task)
-            ).await;
-
-            match session_result {
-                Ok(session) => {
-                    yield CreateSessionResult::Ok {
-                        session_id,
-                        created_at: session.created_at,
-                    };
-                }
-                Err(e) => {
-                    yield CreateSessionResult::Err {
-                        message: format!("Failed to create session: {e}"),
-                    };
-                }
-            }
-        }
+        Ok(SessionCreated {
+            session_id,
+            created_at: session.created_at,
+        })
     }
 
     /// Update session state
@@ -419,21 +403,12 @@ impl<P: HubContext> Orcha<P> {
         &self,
         session_id: SessionId,
         state: SessionState,
-    ) -> impl Stream<Item = UpdateSessionStateResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.update_state(&session_id, state).await {
-                Ok(_) => {
-                    yield UpdateSessionStateResult::Ok;
-                }
-                Err(e) => {
-                    yield UpdateSessionStateResult::Err {
-                        message: format!("Failed to update state: {e}"),
-                    };
-                }
-            }
-        }
+    ) -> Result<(), OrchaError> {
+        self.storage
+            .update_state(&session_id, state)
+            .await
+            .map_err(|e| OrchaError::storage("update_state", e))?;
+        Ok(())
     }
 
     /// Get session information
@@ -441,41 +416,27 @@ impl<P: HubContext> Orcha<P> {
     async fn get_session(
         &self,
         request: GetSessionRequest,
-    ) -> impl Stream<Item = GetSessionResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.get_session(&request.session_id).await {
-                Ok(session) => {
-                    yield GetSessionResult::Ok { session };
-                }
-                Err(e) => {
-                    yield GetSessionResult::Err {
-                        message: format!("Session not found: {e}"),
-                    };
-                }
-            }
-        }
+    ) -> Result<SessionInfo, OrchaError> {
+        self.storage
+            .get_session(&request.session_id)
+            .await
+            .map_err(|_| OrchaError::SessionNotFound {
+                session_id: request.session_id,
+            })
     }
 
     /// Extract validation artifact from text
     ///
     /// Scans text for {"`orcha_validate"`: {...}} pattern and extracts test command
+    ///
+    /// `Ok(None)` is the old `NotFound` variant: no artifact present is a normal
+    /// outcome, not a failure, so it stays on the success side of the `Result`.
     #[plexus_macros::method]
     async fn extract_validation(
         &self,
         text: String,
-    ) -> impl Stream<Item = ExtractValidationResult> + Send + 'static {
-        stream! {
-            match extract_validation_artifact(&text) {
-                Some(artifact) => {
-                    yield ExtractValidationResult::Ok { artifact };
-                }
-                None => {
-                    yield ExtractValidationResult::NotFound;
-                }
-            }
-        }
+    ) -> Result<Option<ValidationArtifact>, OrchaError> {
+        Ok(extract_validation_artifact(&text))
     }
 
     /// Run a validation test
@@ -485,12 +446,8 @@ impl<P: HubContext> Orcha<P> {
     async fn run_validation(
         &self,
         artifact: ValidationArtifact,
-    ) -> impl Stream<Item = RunValidationResult> + Send + 'static {
-        stream! {
-            let result = run_validation_test(&artifact).await;
-
-            yield RunValidationResult::Ok { result };
-        }
+    ) -> Result<ValidationResult, OrchaError> {
+        Ok(run_validation_test(&artifact).await)
     }
 
     /// Increment retry counter for a session
@@ -500,66 +457,41 @@ impl<P: HubContext> Orcha<P> {
     async fn increment_retry(
         &self,
         session_id: SessionId,
-    ) -> impl Stream<Item = IncrementRetryResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<RetryStatus, OrchaError> {
+        let retry_count = self
+            .storage
+            .increment_retry(&session_id)
+            .await
+            .map_err(|e| OrchaError::storage("increment_retry", e))?;
 
-        stream! {
-            match storage.increment_retry(&session_id).await {
-                Ok(count) => {
-                    let max_retries = match storage.get_session(&session_id).await {
-                        Ok(s) => s.max_retries,
-                        Err(e) => {
-                            tracing::warn!("Failed to get session {} for max_retries lookup: {}", session_id, e);
-                            3
-                        }
-                    };
-
-                    yield IncrementRetryResult::Ok {
-                        retry_count: count,
-                        max_retries,
-                        exceeded: count >= max_retries,
-                    };
-                }
-                Err(e) => {
-                    yield IncrementRetryResult::Err {
-                        message: format!("Failed to increment retry: {e}"),
-                    };
-                }
+        let max_retries = match self.storage.get_session(&session_id).await {
+            Ok(s) => s.max_retries,
+            Err(e) => {
+                tracing::warn!("Failed to get session {} for max_retries lookup: {}", session_id, e);
+                3
             }
-        }
+        };
+
+        Ok(RetryStatus {
+            retry_count,
+            max_retries,
+            exceeded: retry_count >= max_retries,
+        })
     }
 
     /// List all sessions
     #[plexus_macros::method]
-    async fn list_sessions(&self) -> impl Stream<Item = ListSessionsResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            let sessions = storage.list_sessions().await;
-            yield ListSessionsResult::Ok { sessions };
-        }
+    async fn list_sessions(&self) -> Result<Vec<SessionInfo>, OrchaError> {
+        Ok(self.storage.list_sessions().await)
     }
 
     /// Delete a session
     #[plexus_macros::method]
-    async fn delete_session(
-        &self,
-        session_id: SessionId,
-    ) -> impl Stream<Item = DeleteSessionResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.delete_session(&session_id).await {
-                Ok(_) => {
-                    yield DeleteSessionResult::Ok;
-                }
-                Err(e) => {
-                    yield DeleteSessionResult::Err {
-                        message: format!("Failed to delete session: {e}"),
-                    };
-                }
-            }
-        }
+    async fn delete_session(&self, session_id: SessionId) -> Result<(), OrchaError> {
+        self.storage
+            .delete_session(&session_id)
+            .await
+            .map_err(|e| OrchaError::storage("delete_session", e))
     }
 
     /// Run a task asynchronously - returns immediately with `session_id`
@@ -571,88 +503,81 @@ impl<P: HubContext> Orcha<P> {
     async fn run_task_async(
         &self,
         request: RunTaskRequest,
-    ) -> impl Stream<Item = RunTaskAsyncResult> + Send + 'static {
+    ) -> Result<SessionRef, OrchaError> {
         let storage = self.storage.clone();
         let arbor_storage = self.arbor_storage.clone();
         let claudecode = self.claudecode.clone();
         let loopback = self.loopback.clone();
 
-        stream! {
-            // Generate session ID that will be used by the orchestrator
-            let session_id = format!("orcha-{}", Uuid::new_v4());
-            let session_id_for_spawn = session_id.clone();
+        // Generate session ID that will be used by the orchestrator
+        let session_id = format!("orcha-{}", Uuid::new_v4());
+        let session_id_for_spawn = session_id.clone();
 
-            // Spawn the orchestration task in the background
-            let req = request.clone();
-            tokio::spawn(async move {
-                let stream = run_orchestration_task(
-                    storage,
-                    arbor_storage,
-                    claudecode,
-                    loopback,
-                    req,
-                    Some(session_id_for_spawn), // Pass the session_id to orchestrator
-                ).await;
-                tokio::pin!(stream);
+        // Spawn the orchestration task in the background
+        let req = request.clone();
+        tokio::spawn(async move {
+            let stream = run_orchestration_task(
+                storage,
+                arbor_storage,
+                claudecode,
+                loopback,
+                req,
+                Some(session_id_for_spawn), // Pass the session_id to orchestrator
+            ).await;
+            tokio::pin!(stream);
 
-                // Consume the stream in the background
-                while let Some(_event) = stream.next().await {
-                    // Events are discarded in async mode
-                    // Use get_session or check_status to monitor
-                }
-            });
+            // Consume the stream in the background
+            while let Some(_event) = stream.next().await {
+                // Events are discarded in async mode
+                // Use get_session or check_status to monitor
+            }
+        });
 
-            // Return immediately with session_id
-            yield RunTaskAsyncResult::Ok { session_id };
-        }
+        // Return immediately with session_id
+        Ok(SessionRef { session_id })
     }
 
     /// List all orcha monitor trees
     ///
     /// Returns all arbor trees created by orcha for monitoring sessions
     #[plexus_macros::method]
-    async fn list_monitor_trees(
-        &self,
-    ) -> impl Stream<Item = ListMonitorTreesResult> + Send + 'static {
+    async fn list_monitor_trees(&self) -> Result<Vec<MonitorTreeInfo>, OrchaError> {
         let arbor_storage = self.arbor_storage.clone();
 
-        stream! {
-            // Query arbor for trees with metadata type="orcha_monitor"
-            let filter = serde_json::json!({"type": "orcha_monitor"});
+        // Query arbor for trees with metadata type="orcha_monitor"
+        let filter = serde_json::json!({"type": "orcha_monitor"});
 
-            match arbor_storage.tree_query_by_metadata(&filter).await {
-                Ok(tree_ids) => {
-                    let mut trees = Vec::new();
+        // A query failure is reported today as an empty list, not an error;
+        // preserved verbatim (T3).
+        let Ok(tree_ids) = arbor_storage.tree_query_by_metadata(&filter).await else {
+            return Ok(vec![]);
+        };
 
-                    // Get metadata for each tree
-                    for tree_id in tree_ids {
-                        if let Ok(tree) = arbor_storage.tree_get(&tree_id).await {
-                            if let Some(metadata) = &tree.metadata {
-                                let session_id = metadata.get("session_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
-                                let tree_path = metadata.get("tree_path")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
+        let mut trees = Vec::new();
 
-                                trees.push(MonitorTreeInfo {
-                                    tree_id: tree.id.to_string(),
-                                    session_id,
-                                    tree_path,
-                                });
-                            }
-                        }
-                    }
+        // Get metadata for each tree
+        for tree_id in tree_ids {
+            if let Ok(tree) = arbor_storage.tree_get(&tree_id).await {
+                if let Some(metadata) = &tree.metadata {
+                    let session_id = metadata.get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let tree_path = metadata.get("tree_path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
 
-                    yield ListMonitorTreesResult::Ok { trees };
-                }
-                Err(_) => {
-                    yield ListMonitorTreesResult::Ok { trees: vec![] };
+                    trees.push(MonitorTreeInfo {
+                        tree_id: tree.id.to_string(),
+                        session_id,
+                        tree_path,
+                    });
                 }
             }
         }
+
+        Ok(trees)
     }
 
     /// Check status of a running session by asking Claude to summarize
@@ -663,42 +588,30 @@ impl<P: HubContext> Orcha<P> {
     async fn check_status(
         &self,
         request: CheckStatusRequest,
-    ) -> impl Stream<Item = CheckStatusResult> + Send + 'static {
+    ) -> Result<StatusSummary, OrchaError> {
         let claudecode = self.claudecode.clone();
         let arbor_storage = self.arbor_storage.clone();
         let storage = self.storage.clone();
         let session_id = request.session_id;
 
-        stream! {
+        {
             // First, get the actual session state from storage
-            let session_info = match storage.get_session(&session_id).await {
-                Ok(info) => info,
-                Err(e) => {
-                    yield CheckStatusResult::Err {
-                        message: format!("Session not found: {e}"),
-                    };
-                    return;
-                }
-            };
+            let session_info = storage.get_session(&session_id).await.map_err(|_| {
+                OrchaError::SessionNotFound { session_id: session_id.clone() }
+            })?;
 
             // Branch based on agent mode
             if session_info.agent_mode == AgentMode::Multi {
                 // Multi-agent status check
-                let agents = match storage.list_agents(&session_id).await {
-                    Ok(a) => a,
-                    Err(e) => {
-                        yield CheckStatusResult::Err {
-                            message: format!("Failed to list agents: {e}"),
-                        };
-                        return;
-                    }
-                };
+                let agents = storage
+                    .list_agents(&session_id)
+                    .await
+                    .map_err(|e| OrchaError::storage("list_agents", e))?;
 
                 if agents.is_empty() {
-                    yield CheckStatusResult::Err {
-                        message: "No agents found in session".to_string(),
-                    };
-                    return;
+                    return Err(OrchaError::OrchestrationError {
+                        detail: "No agents found in session".to_string(),
+                    });
                 }
 
                 // Generate summaries for each agent in parallel
@@ -727,24 +640,13 @@ impl<P: HubContext> Orcha<P> {
 
                 let summary = overall_summary.unwrap_or_else(|| "Unable to generate summary".to_string());
 
-                // Save to arbor monitoring tree
-                match save_status_summary_to_arbor(&arbor_storage, &session_id, &summary).await {
-                    Ok(_) => {
-                        yield CheckStatusResult::Ok {
-                            summary,
-                            agent_summaries,
-                        };
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to save summary to arbor: {}", e);
-                        yield CheckStatusResult::Ok {
-                            summary,
-                            agent_summaries,
-                        };
-                    }
+                // Save to arbor monitoring tree — a save failure is logged, never
+                // propagated: the summary is still returned (T3, verbatim).
+                if let Err(e) = save_status_summary_to_arbor(&arbor_storage, &session_id, &summary).await {
+                    tracing::warn!("Failed to save summary to arbor: {}", e);
                 }
 
-                return;
+                return Ok(StatusSummary { summary, agent_summaries });
             }
 
             // Single-agent mode (original logic below)
@@ -822,10 +724,9 @@ impl<P: HubContext> Orcha<P> {
             }
 
             if !create_ok {
-                yield CheckStatusResult::Err {
-                    message: "Failed to create summary session".to_string(),
-                };
-                return;
+                return Err(OrchaError::OrchestrationError {
+                    detail: "Failed to create summary session".to_string(),
+                });
             }
 
             // Ask Claude to summarize the session with actual context
@@ -888,28 +789,21 @@ impl<P: HubContext> Orcha<P> {
             }
 
             if summary.is_empty() {
-                yield CheckStatusResult::Err {
-                    message: "Failed to generate summary".to_string(),
-                };
-            } else {
-                // Save summary to arbor monitoring tree
-                match save_status_summary_to_arbor(&arbor_storage, &session_id, &summary).await {
-                    Ok(_) => {
-                        yield CheckStatusResult::Ok {
-                            summary,
-                            agent_summaries: vec![],  // Single-agent mode
-                        };
-                    }
-                    Err(e) => {
-                        // Still return the summary even if arbor save fails
-                        tracing::warn!("Failed to save summary to arbor: {}", e);
-                        yield CheckStatusResult::Ok {
-                            summary,
-                            agent_summaries: vec![],  // Single-agent mode
-                        };
-                    }
-                }
+                return Err(OrchaError::OrchestrationError {
+                    detail: "Failed to generate summary".to_string(),
+                });
             }
+
+            // Save summary to arbor monitoring tree.  Still return the summary
+            // even if the arbor save fails (T3, verbatim).
+            if let Err(e) = save_status_summary_to_arbor(&arbor_storage, &session_id, &summary).await {
+                tracing::warn!("Failed to save summary to arbor: {}", e);
+            }
+
+            Ok(StatusSummary {
+                summary,
+                agent_summaries: vec![],  // Single-agent mode
+            })
         }
     }
 
@@ -921,28 +815,21 @@ impl<P: HubContext> Orcha<P> {
     async fn spawn_agent(
         &self,
         request: SpawnAgentRequest,
-    ) -> impl Stream<Item = SpawnAgentResult> + Send + 'static {
+    ) -> Result<SpawnedAgent, OrchaError> {
         let storage = self.storage.clone();
         let claudecode = self.claudecode.clone();
         let loopback = self.loopback.clone();
 
-        stream! {
+        {
             // Verify session exists and is in multi-agent mode
-            let session = match storage.get_session(&request.session_id).await {
-                Ok(s) => s,
-                Err(e) => {
-                    yield SpawnAgentResult::Err {
-                        message: format!("Session not found: {e}"),
-                    };
-                    return;
-                }
-            };
+            let session = storage.get_session(&request.session_id).await.map_err(|_| {
+                OrchaError::SessionNotFound { session_id: request.session_id.clone() }
+            })?;
 
             if session.agent_mode != AgentMode::Multi {
-                yield SpawnAgentResult::Err {
-                    message: "Session is not in multi-agent mode".to_string(),
-                };
-                return;
+                return Err(OrchaError::OrchestrationError {
+                    detail: "Session is not in multi-agent mode".to_string(),
+                });
             }
 
             // Parse model
@@ -976,50 +863,42 @@ impl<P: HubContext> Orcha<P> {
             }
 
             if !create_ok {
-                yield SpawnAgentResult::Err {
-                    message: "Failed to create ClaudeCode session".to_string(),
-                };
-                return;
+                return Err(OrchaError::OrchestrationError {
+                    detail: "Failed to create ClaudeCode session".to_string(),
+                });
             }
 
             // Create agent record
-            match storage.create_agent(
+            let agent = storage.create_agent(
                 &request.session_id,
                 cc_session_name.clone(),
                 request.subtask.clone(),
                 false, // Not primary
                 request.parent_agent_id,
-            ).await {
-                Ok(agent) => {
-                    // Spawn background task to run this agent
-                    let config = super::orchestrator::AgentConfig {
-                        model,
-                        working_directory: "/workspace".to_string(),
-                        max_retries: session.max_retries,
-                        task_context: request.subtask.clone(),
-                        auto_approve: true, // TODO: Store in session and retrieve
-                    };
+            ).await.map_err(|e| OrchaError::storage("create_agent", e))?;
 
-                    super::orchestrator::spawn_agent_task(
-                        storage.clone(),
-                        claudecode.clone(),
-                        loopback.clone(),
-                        agent.clone(),
-                        request.subtask.clone(),
-                        config,
-                    );
+            // Spawn background task to run this agent
+            let config = super::orchestrator::AgentConfig {
+                model,
+                working_directory: "/workspace".to_string(),
+                max_retries: session.max_retries,
+                task_context: request.subtask.clone(),
+                auto_approve: true, // TODO: Store in session and retrieve
+            };
 
-                    yield SpawnAgentResult::Ok {
-                        agent_id: agent.agent_id,
-                        claudecode_session_id: cc_session_name,
-                    };
-                }
-                Err(e) => {
-                    yield SpawnAgentResult::Err {
-                        message: format!("Failed to create agent: {e}"),
-                    };
-                }
-            }
+            super::orchestrator::spawn_agent_task(
+                storage.clone(),
+                claudecode.clone(),
+                loopback.clone(),
+                agent.clone(),
+                request.subtask.clone(),
+                config,
+            );
+
+            Ok(SpawnedAgent {
+                agent_id: agent.agent_id,
+                claudecode_session_id: cc_session_name,
+            })
         }
     }
 
@@ -1028,21 +907,11 @@ impl<P: HubContext> Orcha<P> {
     async fn list_agents(
         &self,
         request: ListAgentsRequest,
-    ) -> impl Stream<Item = ListAgentsResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.list_agents(&request.session_id).await {
-                Ok(agents) => {
-                    yield ListAgentsResult::Ok { agents };
-                }
-                Err(e) => {
-                    yield ListAgentsResult::Err {
-                        message: format!("Failed to list agents: {e}"),
-                    };
-                }
-            }
-        }
+    ) -> Result<Vec<AgentInfo>, OrchaError> {
+        self.storage
+            .list_agents(&request.session_id)
+            .await
+            .map_err(|e| OrchaError::storage("list_agents", e))
     }
 
     /// Get specific agent info
@@ -1050,21 +919,11 @@ impl<P: HubContext> Orcha<P> {
     async fn get_agent(
         &self,
         request: GetAgentRequest,
-    ) -> impl Stream<Item = GetAgentResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.get_agent(&request.agent_id).await {
-                Ok(agent) => {
-                    yield GetAgentResult::Ok { agent };
-                }
-                Err(e) => {
-                    yield GetAgentResult::Err {
-                        message: format!("Agent not found: {e}"),
-                    };
-                }
-            }
-        }
+    ) -> Result<AgentInfo, OrchaError> {
+        self.storage
+            .get_agent(&request.agent_id)
+            .await
+            .map_err(|e| OrchaError::storage("get_agent", e))
     }
 
     /// List pending approval requests for a session
@@ -1075,36 +934,27 @@ impl<P: HubContext> Orcha<P> {
     async fn list_pending_approvals(
         &self,
         request: ListApprovalsRequest,
-    ) -> impl Stream<Item = ListApprovalsResult> + Send + 'static {
+    ) -> Result<Vec<ApprovalInfo>, OrchaError> {
         let loopback = self.loopback.clone();
         let session_id = request.session_id;
 
-        stream! {
-            match loopback.storage().list_pending(Some(&session_id)).await {
-                Ok(approvals) => {
-                    let approval_infos: Vec<ApprovalInfo> = approvals
-                        .into_iter()
-                        .map(|approval| ApprovalInfo {
-                            approval_id: approval.id.to_string(),
-                            session_id: approval.session_id,
-                            tool_name: approval.tool_name,
-                            tool_use_id: approval.tool_use_id,
-                            tool_input: approval.input,
-                            created_at: chrono::DateTime::from_timestamp(approval.created_at, 0).map_or_else(|| approval.created_at.to_string(), |dt| dt.to_rfc3339()),
-                        })
-                        .collect();
+        let approvals = loopback
+            .storage()
+            .list_pending(Some(&session_id))
+            .await
+            .map_err(|e| OrchaError::storage("list_pending", e))?;
 
-                    yield ListApprovalsResult::Ok {
-                        approvals: approval_infos,
-                    };
-                }
-                Err(e) => {
-                    yield ListApprovalsResult::Err {
-                        message: format!("Failed to list pending approvals: {e}"),
-                    };
-                }
-            }
-        }
+        Ok(approvals
+            .into_iter()
+            .map(|approval| ApprovalInfo {
+                approval_id: approval.id.to_string(),
+                session_id: approval.session_id,
+                tool_name: approval.tool_name,
+                tool_use_id: approval.tool_use_id,
+                tool_input: approval.input,
+                created_at: chrono::DateTime::from_timestamp(approval.created_at, 0).map_or_else(|| approval.created_at.to_string(), |dt| dt.to_rfc3339()),
+            })
+            .collect())
     }
 
     /// Approve a pending request
@@ -1115,38 +965,27 @@ impl<P: HubContext> Orcha<P> {
     async fn approve_request(
         &self,
         request: ApproveRequest,
-    ) -> impl Stream<Item = ApprovalActionResult> + Send + 'static {
+    ) -> Result<ApprovalOutcome, OrchaError> {
         let loopback = self.loopback.clone();
         let approval_id = request.approval_id.clone();
         let message = request.message;
 
-        stream! {
-            match uuid::Uuid::parse_str(&approval_id) {
-                Ok(uuid_id) => {
-                    match loopback.storage()
-                        .resolve_approval(&uuid_id, true, message.clone())
-                        .await
-                    {
-                        Ok(_) => {
-                            yield ApprovalActionResult::Ok {
-                                approval_id: approval_id.clone(),
-                                message: Some("Approved".to_string()),
-                            };
-                        }
-                        Err(e) => {
-                            yield ApprovalActionResult::Err {
-                                message: format!("Failed to approve: {e}"),
-                            };
-                        }
-                    }
-                }
-                Err(_) => {
-                    yield ApprovalActionResult::Err {
-                        message: format!("Invalid approval_id format: {approval_id}"),
-                    };
-                }
+        let uuid_id = uuid::Uuid::parse_str(&approval_id).map_err(|_| {
+            OrchaError::ValidationError {
+                detail: format!("Invalid approval_id format: {approval_id}"),
             }
-        }
+        })?;
+
+        loopback
+            .storage()
+            .resolve_approval(&uuid_id, true, message.clone())
+            .await
+            .map_err(|e| OrchaError::storage("resolve_approval", e))?;
+
+        Ok(ApprovalOutcome {
+            approval_id,
+            message: Some("Approved".to_string()),
+        })
     }
 
     /// Deny a pending request
@@ -1157,38 +996,27 @@ impl<P: HubContext> Orcha<P> {
     async fn deny_request(
         &self,
         request: DenyRequest,
-    ) -> impl Stream<Item = ApprovalActionResult> + Send + 'static {
+    ) -> Result<ApprovalOutcome, OrchaError> {
         let loopback = self.loopback.clone();
         let approval_id = request.approval_id.clone();
         let reason = request.reason;
 
-        stream! {
-            match uuid::Uuid::parse_str(&approval_id) {
-                Ok(uuid_id) => {
-                    match loopback.storage()
-                        .resolve_approval(&uuid_id, false, reason.clone())
-                        .await
-                    {
-                        Ok(_) => {
-                            yield ApprovalActionResult::Ok {
-                                approval_id: approval_id.clone(),
-                                message: reason.or(Some("Denied".to_string())),
-                            };
-                        }
-                        Err(e) => {
-                            yield ApprovalActionResult::Err {
-                                message: format!("Failed to deny: {e}"),
-                            };
-                        }
-                    }
-                }
-                Err(_) => {
-                    yield ApprovalActionResult::Err {
-                        message: format!("Invalid approval_id format: {approval_id}"),
-                    };
-                }
+        let uuid_id = uuid::Uuid::parse_str(&approval_id).map_err(|_| {
+            OrchaError::ValidationError {
+                detail: format!("Invalid approval_id format: {approval_id}"),
             }
-        }
+        })?;
+
+        loopback
+            .storage()
+            .resolve_approval(&uuid_id, false, reason.clone())
+            .await
+            .map_err(|e| OrchaError::storage("resolve_approval", e))?;
+
+        Ok(ApprovalOutcome {
+            approval_id,
+            message: reason.or(Some("Denied".to_string())),
+        })
     }
 
     /// Subscribe to pending approval requests for a graph — push stream for human-in-the-loop UIs.
@@ -1408,43 +1236,38 @@ impl<P: HubContext> Orcha<P> {
     #[plexus_macros::method(params(
         graph_id = "Lattice graph ID to cancel"
     ))]
-    async fn cancel_graph(
-        &self,
-        graph_id: String,
-    ) -> impl Stream<Item = OrchaEvent> + Send + 'static {
+    async fn cancel_graph(&self, graph_id: String) -> Result<GraphRef, OrchaError> {
         let cancel_registry = self.cancel_registry.clone();
         let lattice_storage = self.graph_runtime.storage();
-        stream! {
-            // BFS to collect the root graph and all descendant graph IDs.
-            let mut all_graph_ids: Vec<String> = Vec::new();
-            let mut to_visit: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-            to_visit.push_back(graph_id.clone());
-            while let Some(gid) = to_visit.pop_front() {
-                all_graph_ids.push(gid.clone());
-                if let Ok(children) = lattice_storage.get_child_graphs(&gid).await {
-                    for child in children {
-                        to_visit.push_back(child.id);
-                    }
+
+        // BFS to collect the root graph and all descendant graph IDs.
+        let mut all_graph_ids: Vec<String> = Vec::new();
+        let mut to_visit: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        to_visit.push_back(graph_id.clone());
+        while let Some(gid) = to_visit.pop_front() {
+            all_graph_ids.push(gid.clone());
+            if let Ok(children) = lattice_storage.get_child_graphs(&gid).await {
+                for child in children {
+                    to_visit.push_back(child.id);
                 }
             }
+        }
 
-            // Lock the registry once and cancel all collected graphs.
-            let mut registry = cancel_registry.lock().await;
-            let root_cancelled = registry.contains_key(&graph_id);
-            for gid in all_graph_ids {
-                if let Some(cancel_tx) = registry.remove(&gid) {
-                    let _ = cancel_tx.send(true);
-                }
+        // Lock the registry once and cancel all collected graphs.
+        let mut registry = cancel_registry.lock().await;
+        let root_cancelled = registry.contains_key(&graph_id);
+        for gid in all_graph_ids {
+            if let Some(cancel_tx) = registry.remove(&gid) {
+                let _ = cancel_tx.send(true);
             }
+        }
 
-            if root_cancelled {
-                yield OrchaEvent::Cancelled { graph_id };
-            } else {
-                yield OrchaEvent::Failed {
-                    session_id: graph_id,
-                    error: "Graph not found in cancel registry (not running or already finished)".to_string(),
-                };
-            }
+        if root_cancelled {
+            Ok(GraphRef { graph_id })
+        } else {
+            Err(OrchaError::OrchestrationError {
+                detail: "Graph not found in cancel registry (not running or already finished)".to_string(),
+            })
         }
     }
 
@@ -1644,17 +1467,9 @@ impl<P: HubContext> Orcha<P> {
     #[plexus_macros::method(params(
         metadata = "Arbitrary JSON metadata attached to the graph"
     ))]
-    async fn create_graph(
-        &self,
-        metadata: Value,
-    ) -> impl Stream<Item = OrchaCreateGraphResult> + Send + 'static {
-        let graph_runtime = self.graph_runtime.clone();
-        stream! {
-            match graph_runtime.create_graph(metadata).await {
-                Ok(graph) => yield OrchaCreateGraphResult::Ok { graph_id: graph.graph_id },
-                Err(e) => yield OrchaCreateGraphResult::Err { message: e },
-            }
-        }
+    async fn create_graph(&self, metadata: Value) -> Result<GraphRef, OrchaError> {
+        let graph = self.graph_runtime.create_graph(metadata).await?;
+        Ok(GraphRef { graph_id: graph.graph_id })
     }
 
     /// Add a task node — Claude runs `task` as a prompt.
@@ -1666,14 +1481,9 @@ impl<P: HubContext> Orcha<P> {
         &self,
         graph_id: String,
         task: String,
-    ) -> impl Stream<Item = OrchaAddNodeResult> + Send + 'static {
+    ) -> Result<NodeRef, OrchaError> {
         let graph = self.graph_runtime.open_graph(graph_id);
-        stream! {
-            match graph.add_task(task, None).await {
-                Ok(node_id) => yield OrchaAddNodeResult::Ok { node_id },
-                Err(e) => yield OrchaAddNodeResult::Err { message: e },
-            }
-        }
+        Ok(NodeRef { node_id: graph.add_task(task, None).await? })
     }
 
     /// Add a synthesize node — like task, with `prior_work` context prepended from input tokens.
@@ -1685,14 +1495,9 @@ impl<P: HubContext> Orcha<P> {
         &self,
         graph_id: String,
         task: String,
-    ) -> impl Stream<Item = OrchaAddNodeResult> + Send + 'static {
+    ) -> Result<NodeRef, OrchaError> {
         let graph = self.graph_runtime.open_graph(graph_id);
-        stream! {
-            match graph.add_synthesize(task, None).await {
-                Ok(node_id) => yield OrchaAddNodeResult::Ok { node_id },
-                Err(e) => yield OrchaAddNodeResult::Err { message: e },
-            }
-        }
+        Ok(NodeRef { node_id: graph.add_synthesize(task, None).await? })
     }
 
     /// Add a validate node — runs `command` in a shell.
@@ -1706,14 +1511,9 @@ impl<P: HubContext> Orcha<P> {
         graph_id: String,
         command: String,
         cwd: Option<String>,
-    ) -> impl Stream<Item = OrchaAddNodeResult> + Send + 'static {
+    ) -> Result<NodeRef, OrchaError> {
         let graph = self.graph_runtime.open_graph(graph_id);
-        stream! {
-            match graph.add_validate(command, cwd, None).await {
-                Ok(node_id) => yield OrchaAddNodeResult::Ok { node_id },
-                Err(e) => yield OrchaAddNodeResult::Err { message: e },
-            }
-        }
+        Ok(NodeRef { node_id: graph.add_validate(command, cwd, None).await? })
     }
 
     /// Add a gather node — engine-internal, auto-executes when all inbound tokens arrive.
@@ -1725,14 +1525,9 @@ impl<P: HubContext> Orcha<P> {
         &self,
         graph_id: String,
         strategy: GatherStrategy,
-    ) -> impl Stream<Item = OrchaAddNodeResult> + Send + 'static {
+    ) -> Result<NodeRef, OrchaError> {
         let graph = self.graph_runtime.open_graph(graph_id);
-        stream! {
-            match graph.add_gather(strategy).await {
-                Ok(node_id) => yield OrchaAddNodeResult::Ok { node_id },
-                Err(e) => yield OrchaAddNodeResult::Err { message: e },
-            }
-        }
+        Ok(NodeRef { node_id: graph.add_gather(strategy).await? })
     }
 
     /// Add a `SubGraph` node — when dispatched, runs the child graph to completion.
@@ -1747,14 +1542,9 @@ impl<P: HubContext> Orcha<P> {
         &self,
         graph_id: String,
         child_graph_id: String,
-    ) -> impl Stream<Item = OrchaAddNodeResult> + Send + 'static {
+    ) -> Result<NodeRef, OrchaError> {
         let graph = self.graph_runtime.open_graph(graph_id);
-        stream! {
-            match graph.add_subgraph(child_graph_id).await {
-                Ok(node_id) => yield OrchaAddNodeResult::Ok { node_id },
-                Err(e) => yield OrchaAddNodeResult::Err { message: e },
-            }
-        }
+        Ok(NodeRef { node_id: graph.add_subgraph(child_graph_id).await? })
     }
 
     /// Declare that `dependent_node_id` waits for `dependency_node_id` to complete.
@@ -1768,14 +1558,10 @@ impl<P: HubContext> Orcha<P> {
         graph_id: String,
         dependent_node_id: String,
         dependency_node_id: String,
-    ) -> impl Stream<Item = OrchaAddDependencyResult> + Send + 'static {
+    ) -> Result<(), OrchaError> {
         let graph = self.graph_runtime.open_graph(graph_id);
-        stream! {
-            match graph.depends_on(&dependent_node_id, &dependency_node_id).await {
-                Ok(()) => yield OrchaAddDependencyResult::Ok,
-                Err(e) => yield OrchaAddDependencyResult::Err { message: e },
-            }
-        }
+        graph.depends_on(&dependent_node_id, &dependency_node_id).await?;
+        Ok(())
     }
 
     /// Compile a ticket file and build the lattice graph without executing it.
@@ -1790,29 +1576,20 @@ impl<P: HubContext> Orcha<P> {
         &self,
         tickets: String,
         metadata: Value,
-    ) -> impl Stream<Item = OrchaCreateGraphResult> + Send + 'static {
+    ) -> Result<GraphRef, OrchaError> {
         let graph_runtime = self.graph_runtime.clone();
         let pm = self.pm.clone();
-        stream! {
-            let compiled = match ticket_compiler::compile_tickets(&tickets) {
-                Ok(c) => c,
-                Err(e) => {
-                    yield OrchaCreateGraphResult::Err {
-                        message: format!("Ticket compile error: {e}"),
-                    };
-                    return;
-                }
-            };
-            match build_graph_from_definition(
-                graph_runtime, metadata, compiled.nodes, compiled.edges,
-            ).await {
-                Ok((graph_id, id_map)) => {
-                    let _ = pm.save_ticket_map(&graph_id, &id_map).await;
-                    yield OrchaCreateGraphResult::Ok { graph_id };
-                }
-                Err(e) => yield OrchaCreateGraphResult::Err { message: e },
-            }
-        }
+
+        let compiled = ticket_compiler::compile_tickets(&tickets).map_err(|e| {
+            OrchaError::ValidationError { detail: format!("Ticket compile error: {e}") }
+        })?;
+
+        let (graph_id, id_map) = build_graph_from_definition(
+            graph_runtime, metadata, compiled.nodes, compiled.edges,
+        ).await?;
+
+        let _ = pm.save_ticket_map(&graph_id, &id_map).await;
+        Ok(GraphRef { graph_id })
     }
 
     /// Compile a ticket file and execute the resulting graph.
@@ -1972,24 +1749,17 @@ impl<P: HubContext> Orcha<P> {
         metadata: Value,
         model: Option<String>,
         working_directory: Option<String>,
-    ) -> impl Stream<Item = OrchaEvent> + Send + 'static {
+    ) -> Result<GraphRef, OrchaError> {
         let graph_runtime = self.graph_runtime.clone();
         let claudecode = self.claudecode.clone();
         let arbor_storage = self.arbor_storage.clone();
         let loopback_storage = self.loopback.storage();
         let pm = self.pm.clone();
         let cancel_registry = self.cancel_registry.clone();
-        stream! {
-            let compiled = match ticket_compiler::compile_tickets(&tickets) {
-                Ok(c) => c,
-                Err(e) => {
-                    yield OrchaEvent::Failed {
-                        session_id: "tickets".to_string(),
-                        error: format!("Ticket compile error: {e}"),
-                    };
-                    return;
-                }
-            };
+        {
+            let compiled = ticket_compiler::compile_tickets(&tickets).map_err(|e| {
+                OrchaError::ValidationError { detail: format!("Ticket compile error: {e}") }
+            })?;
 
             let model_str = model.as_deref().unwrap_or("sonnet").to_string();
             let wd = working_directory.unwrap_or_else(|| "/workspace".to_string());
@@ -1997,14 +1767,12 @@ impl<P: HubContext> Orcha<P> {
             // Validate working directory before building the graph so the caller
             // gets a clear error rather than every node failing with an opaque message.
             if !std::path::Path::new(&wd).is_dir() {
-                yield OrchaEvent::Failed {
-                    session_id: "tickets".to_string(),
-                    error: format!(
+                return Err(OrchaError::ValidationError {
+                    detail: format!(
                         "Working directory does not exist: '{wd}'. \
                          Create it before running tickets or pass an existing path."
                     ),
-                };
-                return;
+                });
             }
 
             let mut enriched_metadata = if metadata.is_object() {
@@ -2017,23 +1785,14 @@ impl<P: HubContext> Orcha<P> {
                 "working_directory": wd,
             });
 
-            let (graph_id, id_map) = match build_graph_from_definition(
+            let (graph_id, id_map) = build_graph_from_definition(
                 graph_runtime.clone(), enriched_metadata, compiled.nodes, compiled.edges,
-            ).await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    yield OrchaEvent::Failed {
-                        session_id: "tickets".to_string(),
-                        error: e,
-                    };
-                    return;
-                }
-            };
+            ).await?;
 
             let _ = pm.save_ticket_map(&graph_id, &id_map).await;
             let _ = pm.save_ticket_source(&graph_id, &tickets).await;
 
-            yield OrchaEvent::GraphStarted { graph_id: graph_id.clone() };
+            let started = GraphRef { graph_id: graph_id.clone() };
 
             let model_enum = match model_str.as_str() {
                 "opus" => Model::Opus,
@@ -2084,6 +1843,8 @@ impl<P: HubContext> Orcha<P> {
                 }
                 cancel_registry.lock().await.remove(&graph_id);
             });
+
+            Ok(started)
         }
     }
 
