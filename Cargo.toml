@@ -68,6 +68,10 @@ cllient = "0.2.1"
 # crates.io registry 0.1 would drag in core 0.5 and create a dual-core hazard.
 plexus-macros = { path = "../plexus-macros", version = "0.6" }
 plexus-core = { path = "../plexus-core", version = "0.6" }
+# PLX-127: the tenant mount gate names TenantResolver / TenantId directly.
+# Already in the graph transitively through plexus-core, so this adds an
+# import path, not a version.
+plexus-auth-core = { path = "../plexus-auth-core", version = "0.2" }
 plexus-transport = { path = "../plexus-transport", version = "0.4", features = ["mcp-gateway"] }
 # plexus-jsexec = "0.1.0"  # temporarily disabled - needs API updates
 registry = { package = "plexus-registry", path = "../plexus-registry", version = "0.2" }
