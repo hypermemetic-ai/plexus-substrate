@@ -2,18 +2,17 @@ use super::storage::{OrchaStorage, OrchaStorageConfig};
 use super::types::*;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Helper to create a test storage instance with a unique database
 async fn create_test_storage() -> Arc<OrchaStorage> {
-    // Use /tmp for test databases to avoid permission issues
-    let test_db = format!(
-        "/tmp/orcha_test_{}.db",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    // Use /tmp for test databases to avoid permission issues.
+    //
+    // PLX-133/PLX-145: a nanosecond timestamp is NOT unique under test
+    // parallelism — two tests starting in the same nanosecond shared one file
+    // and raced each other's `ALTER TABLE`, failing with "duplicate column
+    // name: agent_mode". It cost a spurious red board twice. A v4 uuid cannot
+    // collide, so the flake is unrepresentable rather than unlikely.
+    let test_db = format!("/tmp/orcha_test_{}.db", uuid::Uuid::new_v4());
     let config = OrchaStorageConfig {
         db_path: PathBuf::from(&test_db),
     };
