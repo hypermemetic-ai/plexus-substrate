@@ -1,0 +1,34 @@
+4,6c4,6
+< EDGE	root/health	db32914112af146c
+< EDGE	root/registry	b4d15b5f5ca5774d
+< EDGE	root/solar/body	d5ae29f8bda0e7ac6e0969e8f885a572983054e6eacc32ac2e659748698e756d
+---
+> EDGE	root/health	ade6c9189192952d0a6c760f53a5262eb7502a24ad6a839078c8d06dc21019ed
+> EDGE	root/registry	f604a47e7f38ed8ffa2abd8cc715949770b2375a78e104903b37d726a9cf5acb
+> EDGE	root/solar/body	d0af901fda56ad999647a6e92181440ff6cec974cc06f79a35e8680cebef258d
+8,10c8,10
+< EDGE	root/tenants/health	db32914112af146c
+< EDGE	root/tenants/registry	b4d15b5f5ca5774d
+< EDGE	root/tenants/solar/body	d5ae29f8bda0e7ac6e0969e8f885a572983054e6eacc32ac2e659748698e756d
+---
+> EDGE	root/tenants/health	ade6c9189192952d0a6c760f53a5262eb7502a24ad6a839078c8d06dc21019ed
+> EDGE	root/tenants/registry	f604a47e7f38ed8ffa2abd8cc715949770b2375a78e104903b37d726a9cf5acb
+> EDGE	root/tenants/solar/body	d0af901fda56ad999647a6e92181440ff6cec974cc06f79a35e8680cebef258d
+203c203
+< NODE	root	03d3b06b30ff3f08026ac90f2bfb4715e6967bc00f9c5716bb56352a2bc0c672
+---
+> NODE	root	64697b9a99182261933f174daf3631aadd5faf4dbc94adabc60cf7474197b928
+216,217c216,217
+< NODE	root/solar	551afcdf106b444d239b4fddc9dc1c5c2f05c062678b025d39c830c6df7671e1
+< NODE	root/tenants	f99e1de38f73b1e69636b102064e78febcb95aa976b37d33d6d29be808e60e37
+---
+> NODE	root/solar	55aaa08beac3359f4c177927d506ddec93454749027f2571d5a0fbba87f947b4
+> NODE	root/tenants	7d787bb230fff821450b9ab97d1e512692aa118ce459c090a631f6fd6237932d
+226c226
+< NODE	root/tenants/solar	551afcdf106b444d239b4fddc9dc1c5c2f05c062678b025d39c830c6df7671e1
+---
+> NODE	root/tenants/solar	55aaa08beac3359f4c177927d506ddec93454749027f2571d5a0fbba87f947b4
+228c228
+< DOC-HASH	fca44863afa84024ec655c18c9eac4d79008c349c57a6860c99dcf0c36fc5d37
+---
+> DOC-HASH	f7b15859330e815234963c5b8f0da7a7377e44520c78bdbfcaf1c98aaffd3614

@@ -1,0 +1,54 @@
+PLX-148 — one document fetch, then every Dynamic child
+====================================================================
+  -> FETCH root                             substrate.connectome {}  (75 B out)
+  <- FRAME root                             type=data   1035381 B
+  <- FRAME root                             type=done   199 B
+
+ROOT  namespace=substrate  ir_hash=f7b15859330e815234963c5b8f0da7a7377e44520c78bdbfcaf1c98aaffd3614
+      hash_algorithm=CONNECTOME-HASH/1  backend_name=substrate  respond_method=substrate.respond
+      methods=0  children=15  bytes=1115023
+
+WALKED LOCALLY: 22 Static + 1 Indexed edges, 0 fetches
+DYNAMIC EDGES ADVERTISED: 9
+
+  -> FETCH claudecode/session               substrate.connectome {"namespace": "claudecode/session"}  (108 B out)
+  <- FRAME claudecode/session               type=data   7830 B
+  <- FRAME claudecode/session               type=done   199 B
+     ns=session      methods=3   hash=577cb542c2617327…  advertised-matches=True
+  -> FETCH cone/of                          substrate.connectome {"namespace": "cone/of"}  (97 B out)
+  <- FRAME cone/of                          type=data   7369 B
+  <- FRAME cone/of                          type=done   199 B
+     ns=cone         methods=4   hash=5aa2725728b34dce…  advertised-matches=True
+  -> FETCH health                           substrate.connectome {"namespace": "health"}  (96 B out)
+  <- FRAME health                           type=data   1485 B
+  <- FRAME health                           type=done   199 B
+     ns=health       methods=1   hash=ade6c9189192952d…  advertised-matches=True
+  -> FETCH registry                         substrate.connectome {"namespace": "registry"}  (98 B out)
+  <- FRAME registry                         type=data   37055 B
+  <- FRAME registry                         type=done   199 B
+     ns=registry     methods=8   hash=f604a47e7f38ed8f…  advertised-matches=True
+  -> FETCH solar/body                       substrate.connectome {"namespace": "solar/body"}  (100 B out)
+  <- FRAME solar/body                       type=data   1989 B
+  <- FRAME solar/body                       type=done   199 B
+     ns=celestial    methods=1   hash=d0af901fda56ad99…  advertised-matches=True
+  -> FETCH tenants/cone/of                  substrate.connectome {"namespace": "tenants/cone/of"}  (105 B out)
+  <- FRAME tenants/cone/of                  type=data   7369 B
+  <- FRAME tenants/cone/of                  type=done   199 B
+     ns=cone         methods=4   hash=5aa2725728b34dce…  advertised-matches=True
+  -> FETCH tenants/health                   substrate.connectome {"namespace": "tenants/health"}  (104 B out)
+  <- FRAME tenants/health                   type=data   1485 B
+  <- FRAME tenants/health                   type=done   199 B
+     ns=health       methods=1   hash=ade6c9189192952d…  advertised-matches=True
+  -> FETCH tenants/registry                 substrate.connectome {"namespace": "tenants/registry"}  (106 B out)
+  <- FRAME tenants/registry                 type=data   37055 B
+  <- FRAME tenants/registry                 type=done   199 B
+     ns=registry     methods=8   hash=f604a47e7f38ed8f…  advertised-matches=True
+  -> FETCH tenants/solar/body               substrate.connectome {"namespace": "tenants/solar/body"}  (109 B out)
+  <- FRAME tenants/solar/body               type=data   1989 B
+  <- FRAME tenants/solar/body               type=done   199 B
+     ns=celestial    methods=1   hash=d0af901fda56ad99…  advertised-matches=True
+
+====================================================================
+DYNAMIC EDGES: 9   FETCHED+HASH-VERIFIED: 9   FAILED: 0
+TOTAL FETCHES: 10  (1 document + 9 lazy)
+TOTAL BYTES IN: 1141498
