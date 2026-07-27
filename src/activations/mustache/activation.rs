@@ -5,9 +5,7 @@
 //! handle values consistently.
 
 use super::storage::{MustacheStorage, MustacheStorageConfig};
-use super::types::MustacheEvent;
-use async_stream::stream;
-use futures::Stream;
+use super::types::{MustacheError, TemplateInfo};
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -110,59 +108,30 @@ impl Mustache {
         method: String,
         template_name: Option<String>,
         value: Value,
-    ) -> impl Stream<Item = MustacheEvent> + Send + 'static {
-        let storage = Arc::clone(&self.storage);
+    ) -> Result<String, MustacheError> {
         let name = template_name.unwrap_or_else(|| "default".to_string());
 
-        stream! {
-            // Look up the template
-            match storage.get_template(&plugin_id, &method, &name).await {
-                Ok(Some(template_str)) => {
-                    // Compile and render the template
-                    match mustache::compile_str(&template_str) {
-                        Ok(template) => {
-                            let mut output = Vec::new();
-                            match template.render(&mut output, &value) {
-                                Ok(()) => {
-                                    match String::from_utf8(output) {
-                                        Ok(rendered) => {
-                                            yield MustacheEvent::Rendered { output: rendered };
-                                        }
-                                        Err(e) => {
-                                            yield MustacheEvent::Error {
-                                                message: format!("UTF-8 conversion error: {e}"),
-                                            };
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    yield MustacheEvent::Error {
-                                        message: format!("Template render error: {e}"),
-                                    };
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            yield MustacheEvent::Error {
-                                message: format!("Template compile error: {e}"),
-                            };
-                        }
-                    }
-                }
-                Ok(None) => {
-                    yield MustacheEvent::NotFound {
-                        message: format!(
-                            "Template not found: plugin={plugin_id}, method={method}, name={name}"
-                        ),
-                    };
-                }
-                Err(e) => {
-                    yield MustacheEvent::Error {
-                        message: format!("Storage error: {e}"),
-                    };
-                }
-            }
-        }
+        // Look up the template
+        let template_str = self
+            .storage
+            .get_template(&plugin_id, &method, &name)
+            .await
+            .map_err(|e| MustacheError::StorageError(format!("Storage error: {e}")))?
+            .ok_or_else(|| {
+                MustacheError::TemplateNotFound(format!(
+                    "plugin={plugin_id}, method={method}, name={name}"
+                ))
+            })?;
+
+        // Compile and render the template
+        let template = mustache::compile_str(&template_str)
+            .map_err(|e| MustacheError::InvalidTemplate(format!("Template compile error: {e}")))?;
+        let mut output = Vec::new();
+        template
+            .render(&mut output, &value)
+            .map_err(|e| MustacheError::RenderError(format!("Template render error: {e}")))?;
+        String::from_utf8(output)
+            .map_err(|e| MustacheError::RenderError(format!("UTF-8 conversion error: {e}")))
     }
 
     /// Register a template for a plugin/method
@@ -182,29 +151,17 @@ impl Mustache {
         method: String,
         name: String,
         template: String,
-    ) -> impl Stream<Item = MustacheEvent> + Send + 'static {
-        let storage = Arc::clone(&self.storage);
+    ) -> Result<TemplateInfo, MustacheError> {
+        // Validate the template compiles
+        mustache::compile_str(&template)
+            .map_err(|e| MustacheError::InvalidTemplate(format!("Invalid template: {e}")))?;
 
-        stream! {
-            // Validate the template compiles
-            if let Err(e) = mustache::compile_str(&template) {
-                yield MustacheEvent::Error {
-                    message: format!("Invalid template: {e}"),
-                };
-                return;
-            }
-
-            match storage.set_template(&plugin_id, &method, &name, &template).await {
-                Ok(info) => {
-                    yield MustacheEvent::Registered { template: info };
-                }
-                Err(e) => {
-                    yield MustacheEvent::Error {
-                        message: format!("Failed to register template: {e}"),
-                    };
-                }
-            }
-        }
+        self.storage
+            .set_template(&plugin_id, &method, &name, &template)
+            .await
+            .map_err(|e| {
+                MustacheError::StorageError(format!("Failed to register template: {e}"))
+            })
     }
 
     /// List all templates for a plugin
@@ -213,21 +170,11 @@ impl Mustache {
     async fn list_templates(
         &self,
         plugin_id: Uuid,
-    ) -> impl Stream<Item = MustacheEvent> + Send + 'static {
-        let storage = Arc::clone(&self.storage);
-
-        stream! {
-            match storage.list_templates(&plugin_id).await {
-                Ok(templates) => {
-                    yield MustacheEvent::Templates { templates };
-                }
-                Err(e) => {
-                    yield MustacheEvent::Error {
-                        message: format!("Failed to list templates: {e}"),
-                    };
-                }
-            }
-        }
+    ) -> Result<Vec<TemplateInfo>, MustacheError> {
+        self.storage
+            .list_templates(&plugin_id)
+            .await
+            .map_err(|e| MustacheError::StorageError(format!("Failed to list templates: {e}")))
     }
 
     /// Get a specific template
@@ -242,28 +189,16 @@ impl Mustache {
         plugin_id: Uuid,
         method: String,
         name: String,
-    ) -> impl Stream<Item = MustacheEvent> + Send + 'static {
-        let storage = Arc::clone(&self.storage);
-
-        stream! {
-            match storage.get_template(&plugin_id, &method, &name).await {
-                Ok(Some(template)) => {
-                    yield MustacheEvent::Template { template };
-                }
-                Ok(None) => {
-                    yield MustacheEvent::NotFound {
-                        message: format!(
-                            "Template not found: plugin={plugin_id}, method={method}, name={name}"
-                        ),
-                    };
-                }
-                Err(e) => {
-                    yield MustacheEvent::Error {
-                        message: format!("Failed to get template: {e}"),
-                    };
-                }
-            }
-        }
+    ) -> Result<String, MustacheError> {
+        self.storage
+            .get_template(&plugin_id, &method, &name)
+            .await
+            .map_err(|e| MustacheError::StorageError(format!("Failed to get template: {e}")))?
+            .ok_or_else(|| {
+                MustacheError::TemplateNotFound(format!(
+                    "plugin={plugin_id}, method={method}, name={name}"
+                ))
+            })
     }
 
     /// Delete a template
@@ -278,22 +213,11 @@ impl Mustache {
         plugin_id: Uuid,
         method: String,
         name: String,
-    ) -> impl Stream<Item = MustacheEvent> + Send + 'static {
-        let storage = Arc::clone(&self.storage);
-
-        stream! {
-            match storage.delete_template(&plugin_id, &method, &name).await {
-                Ok(deleted) => {
-                    yield MustacheEvent::Deleted {
-                        count: usize::from(deleted),
-                    };
-                }
-                Err(e) => {
-                    yield MustacheEvent::Error {
-                        message: format!("Failed to delete template: {e}"),
-                    };
-                }
-            }
-        }
+    ) -> Result<usize, MustacheError> {
+        self.storage
+            .delete_template(&plugin_id, &method, &name)
+            .await
+            .map(usize::from)
+            .map_err(|e| MustacheError::StorageError(format!("Failed to delete template: {e}")))
     }
 }

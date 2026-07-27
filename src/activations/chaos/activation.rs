@@ -1,4 +1,4 @@
-use super::types::{ListRunningResult, RunningNode, InjectResult, ListProcessesResult, ProcessInfo, KillProcessResult, GraphSnapshotResult, NodeSnapshot};
+use super::types::{ChaosError, ListRunningResult, RunningNode, InjectResult, ListProcessesResult, ProcessInfo, KillProcessResult, GraphSnapshotResult, NodeSnapshot};
 use crate::activations::lattice::{LatticeStorage, NodeStatus};
 use async_stream::stream;
 use futures::Stream;
@@ -102,32 +102,25 @@ impl Chaos {
         graph_id: String,
         node_id: String,
         error: Option<String>,
-    ) -> impl Stream<Item = InjectResult> + Send + 'static {
-        let lattice = self.lattice.clone();
-        stream! {
-            let error_msg = error.unwrap_or_else(|| "chaos: injected failure".to_string());
+    ) -> Result<InjectResult, ChaosError> {
+        let error_msg = error.unwrap_or_else(|| "chaos: injected failure".to_string());
 
-            // Verify node is Running before injecting
-            let node = match lattice.get_node(&node_id).await {
-                Ok(n) => n,
-                Err(e) => { yield InjectResult::Err { message: e }; return; }
-            };
-            if node.status != NodeStatus::Running {
-                yield InjectResult::Skipped {
-                    reason: format!("node is {:?}, not Running", node.status),
-                };
-                return;
-            }
-
-            match lattice.advance_graph(&graph_id, &node_id, None, Some(error_msg.clone())).await {
-                Ok(()) => yield InjectResult::Ok {
-                    graph_id,
-                    node_id,
-                    action: format!("failed: {error_msg}"),
-                },
-                Err(e) => yield InjectResult::Err { message: e },
-            }
+        // Verify node is Running before injecting
+        let node = self.lattice.get_node(&node_id).await?;
+        if node.status != NodeStatus::Running {
+            return Ok(InjectResult::Skipped {
+                reason: format!("node is {:?}, not Running", node.status),
+            });
         }
+
+        self.lattice
+            .advance_graph(&graph_id, &node_id, None, Some(error_msg.clone()))
+            .await?;
+        Ok(InjectResult::Ok {
+            graph_id,
+            node_id,
+            action: format!("failed: {error_msg}"),
+        })
     }
 
     /// Force-complete a specific node with an ok token.
@@ -143,40 +136,34 @@ impl Chaos {
         graph_id: String,
         node_id: String,
         value: Option<String>,
-    ) -> impl Stream<Item = InjectResult> + Send + 'static {
+    ) -> Result<InjectResult, ChaosError> {
         use crate::activations::lattice::{NodeOutput, Token, TokenColor, TokenPayload};
-        let lattice = self.lattice.clone();
-        stream! {
-            let node = match lattice.get_node(&node_id).await {
-                Ok(n) => n,
-                Err(e) => { yield InjectResult::Err { message: e }; return; }
-            };
-            if node.status != NodeStatus::Running {
-                yield InjectResult::Skipped {
-                    reason: format!("node is {:?}, not Running", node.status),
-                };
-                return;
-            }
 
-            let payload_value = value
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or(serde_json::Value::Null);
-
-            let output = NodeOutput::Single(Token {
-                color: TokenColor::Ok,
-                payload: Some(TokenPayload::Data { value: payload_value }),
+        let node = self.lattice.get_node(&node_id).await?;
+        if node.status != NodeStatus::Running {
+            return Ok(InjectResult::Skipped {
+                reason: format!("node is {:?}, not Running", node.status),
             });
-
-            match lattice.advance_graph(&graph_id, &node_id, Some(output), None).await {
-                Ok(()) => yield InjectResult::Ok {
-                    graph_id,
-                    node_id,
-                    action: "succeeded".to_string(),
-                },
-                Err(e) => yield InjectResult::Err { message: e },
-            }
         }
+
+        let payload_value = value
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+
+        let output = NodeOutput::Single(Token {
+            color: TokenColor::Ok,
+            payload: Some(TokenPayload::Data { value: payload_value }),
+        });
+
+        self.lattice
+            .advance_graph(&graph_id, &node_id, Some(output), None)
+            .await?;
+        Ok(InjectResult::Ok {
+            graph_id,
+            node_id,
+            action: "succeeded".to_string(),
+        })
     }
 
     /// List system processes whose cmdline contains the given pattern.
@@ -202,30 +189,26 @@ impl Chaos {
     async fn kill_process(
         &self,
         pid: u32,
-    ) -> impl Stream<Item = KillProcessResult> + Send + 'static {
-        stream! {
-            // Verify process exists first
-            let cmdline_path = format!("/proc/{pid}/cmdline");
-            if !std::path::Path::new(&cmdline_path).exists() {
-                yield KillProcessResult::NotFound;
-                return;
-            }
+    ) -> Result<KillProcessResult, ChaosError> {
+        // Verify process exists first
+        let cmdline_path = format!("/proc/{pid}/cmdline");
+        if !std::path::Path::new(&cmdline_path).exists() {
+            return Ok(KillProcessResult::NotFound);
+        }
 
-            // SAFETY: libc::kill is a POSIX syscall with no safe wrapper in std.
-            // pid fits in i32 (process IDs on supported platforms are <= i32::MAX);
-            // SIGKILL is a const defined by libc. Neither dereferences user memory.
-            #[allow(unsafe_code)]
-            let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-            if result == 0 {
-                yield KillProcessResult::Killed { pid };
-            } else {
-                let errno = std::io::Error::last_os_error();
-                if errno.raw_os_error() == Some(libc::ESRCH) {
-                    yield KillProcessResult::NotFound;
-                } else {
-                    yield KillProcessResult::Err { message: format!("kill failed: {errno}") };
-                }
-            }
+        // SAFETY: libc::kill is a POSIX syscall with no safe wrapper in std.
+        // pid fits in i32 (process IDs on supported platforms are <= i32::MAX);
+        // SIGKILL is a const defined by libc. Neither dereferences user memory.
+        #[allow(unsafe_code)]
+        let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        if result == 0 {
+            return Ok(KillProcessResult::Killed { pid });
+        }
+        let errno = std::io::Error::last_os_error();
+        if errno.raw_os_error() == Some(libc::ESRCH) {
+            Ok(KillProcessResult::NotFound)
+        } else {
+            Err(ChaosError::KillFailed(errno.to_string()))
         }
     }
 
@@ -282,6 +265,14 @@ impl Chaos {
     /// Hard-crash the substrate process (SIGKILL self).
     /// Used to test crash recovery — the substrate will not respond after this call.
     /// Restart with `make restart` and observe `recovery: re-dispatching` in the logs.
+    ///
+    /// PLX-118: this yields exactly once and would otherwise be on the unary
+    /// conversion queue, but it is deliberately NOT converted. The generated
+    /// handler emits a stream item as soon as it is yielded, whereas a unary
+    /// `Result` is only serialized after the handler future **returns** — and
+    /// this handler never returns, because it SIGKILLs its own process. The
+    /// yield-then-sleep-then-kill ordering is load-bearing: as a `Result` the
+    /// caller would receive nothing at all. It keeps `impl Stream`.
     #[plexus_macros::method(description = "Hard-crash the substrate (SIGKILL self) — use to test crash recovery")]
     async fn crash(&self) -> impl Stream<Item = InjectResult> + Send + 'static {
         stream! {

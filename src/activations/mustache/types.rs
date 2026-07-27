@@ -22,6 +22,13 @@ pub struct TemplateInfo {
 }
 
 /// Error type for Mustache operations
+///
+/// PLX-118: this type already existed but was unreachable from the wire — every
+/// method flattened its failures into `MustacheEvent::Error { message }` because
+/// the stream was the only channel an error could travel down (PLX-109 §2).
+/// Since PLX-110 it is the activation's `E`, and the single
+/// `impl From<MustacheError> for TurnError` below is the one place mustache
+/// shapes an error for the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum MustacheError {
     #[error("Template not found: {0}")]
@@ -49,49 +56,22 @@ impl From<&str> for MustacheError {
     }
 }
 
-/// Events from mustache operations
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MustacheEvent {
-    /// Template rendered successfully
-    Rendered {
-        /// The rendered output
-        output: String,
-    },
-
-    /// Template registered successfully
-    Registered {
-        /// Template info
-        template: TemplateInfo,
-    },
-
-    /// Template retrieved
-    Template {
-        /// The template content
-        template: String,
-    },
-
-    /// Template not found
-    NotFound {
-        /// Description of what was not found
-        message: String,
-    },
-
-    /// List of templates
-    Templates {
-        /// The templates
-        templates: Vec<TemplateInfo>,
-    },
-
-    /// Template deleted
-    Deleted {
-        /// Number of templates deleted
-        count: usize,
-    },
-
-    /// Error occurred
-    Error {
-        /// Error message
-        message: String,
-    },
+impl From<MustacheError> for plexus_core::runtime::TurnError {
+    fn from(e: MustacheError) -> Self {
+        let code = match e {
+            MustacheError::TemplateNotFound(_) => "mustache.template_not_found",
+            MustacheError::StorageError(_) => "mustache.storage_error",
+            MustacheError::RenderError(_) => "mustache.render_error",
+            MustacheError::InvalidTemplate(_) => "mustache.invalid_template",
+        };
+        plexus_core::runtime::TurnError::structured(code, e.to_string(), &e)
+    }
 }
+
+// PLX-118: `MustacheEvent` is deleted. All five mustache methods yielded
+// exactly once, so each now returns its payload directly as the terminal of a
+// unary `Result` (PLX-110) — `String` for `render` and `get_template`,
+// `TemplateInfo` for `register_template`, `Vec<TemplateInfo>` for
+// `list_templates`, `usize` for `delete_template`. The `Error` and `NotFound`
+// variants — the flattened error channel this migration exists to delete —
+// became `MustacheError` variants above.

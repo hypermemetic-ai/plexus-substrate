@@ -10,4 +10,4 @@ mod types;
 
 pub use activation::Mustache;
 pub use storage::{MustacheStorage, MustacheStorageConfig};
-pub use types::{MustacheError, MustacheEvent, TemplateInfo};
+pub use types::{MustacheError, TemplateInfo};

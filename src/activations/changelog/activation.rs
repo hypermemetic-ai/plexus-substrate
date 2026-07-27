@@ -1,7 +1,5 @@
 use super::storage::{ChangelogStorage, ChangelogStorageConfig};
-use super::types::{ChangelogEntry, ChangelogEvent, QueueEntry};
-use async_stream::stream;
-use futures::Stream;
+use super::types::{ChangelogEntry, ChangelogError, ChangelogEvent, QueueEntry};
 use std::sync::Arc;
 
 /// Changelog activation - tracks Plexus RPC server hash changes and enforces documentation
@@ -74,53 +72,35 @@ impl Changelog {
         details: Option<Vec<String>>,
         author: Option<String>,
         queue_id: Option<String>,
-    ) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<ChangelogEvent, ChangelogError> {
+        let mut entry = ChangelogEntry::new(hash.clone(), previous_hash, summary);
+        if let Some(d) = details {
+            entry = entry.with_details(d);
+        }
+        if let Some(a) = author {
+            entry = entry.with_author(a);
+        }
+        if let Some(q) = queue_id.clone() {
+            entry = entry.with_queue_id(q);
+        }
 
-        stream! {
-            let mut entry = ChangelogEntry::new(hash.clone(), previous_hash, summary);
-            if let Some(d) = details {
-                entry = entry.with_details(d);
-            }
-            if let Some(a) = author {
-                entry = entry.with_author(a);
-            }
-            if let Some(q) = queue_id.clone() {
-                entry = entry.with_queue_id(q);
-            }
+        self.storage.add_entry(&entry).await?;
 
-            match storage.add_entry(&entry).await {
-                Ok(()) => {
-                    // If this completes a queue item, mark it complete
-                    if let Some(qid) = queue_id {
-                        if let Err(e) = storage.complete_queue_entry(&qid, &hash).await {
-                            tracing::warn!("Failed to complete queue entry {}: {}", qid, e);
-                        }
-                    }
-                    yield ChangelogEvent::EntryAdded { entry };
-                }
-                Err(e) => {
-                    tracing::error!("Failed to add changelog entry: {}", e);
-                }
+        // If this completes a queue item, mark it complete. Best-effort, exactly
+        // as before: a failure here is logged and does not fail the turn.
+        if let Some(qid) = queue_id {
+            if let Err(e) = self.storage.complete_queue_entry(&qid, &hash).await {
+                tracing::warn!("Failed to complete queue entry {}: {}", qid, e);
             }
         }
+        Ok(ChangelogEvent::EntryAdded { entry })
     }
 
     /// List all changelog entries
     #[plexus_macros::method(description = "List all changelog entries (newest first)")]
-    async fn list(&self) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.list_entries().await {
-                Ok(entries) => {
-                    yield ChangelogEvent::Entries { entries };
-                }
-                Err(e) => {
-                    tracing::error!("Failed to list changelog entries: {}", e);
-                }
-            }
-        }
+    async fn list(&self) -> Result<ChangelogEvent, ChangelogError> {
+        let entries = self.storage.list_entries().await?;
+        Ok(ChangelogEvent::Entries { entries })
     }
 
     /// Get a specific changelog entry by hash
@@ -128,26 +108,16 @@ impl Changelog {
     async fn get(
         &self,
         hash: String,
-    ) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.get_entry(&hash).await {
-                Ok(entry) => {
-                    let is_documented = entry.is_some();
-                    let previous_hash = storage.get_last_hash().await.ok().flatten();
-                    yield ChangelogEvent::Status {
-                        current_hash: hash,
-                        previous_hash,
-                        is_documented,
-                        entry,
-                    };
-                }
-                Err(e) => {
-                    tracing::error!("Failed to get changelog entry: {}", e);
-                }
-            }
-        }
+    ) -> Result<ChangelogEvent, ChangelogError> {
+        let entry = self.storage.get_entry(&hash).await?;
+        let is_documented = entry.is_some();
+        let previous_hash = self.storage.get_last_hash().await.ok().flatten();
+        Ok(ChangelogEvent::Status {
+            current_hash: hash,
+            previous_hash,
+            is_documented,
+            entry,
+        })
     }
 
     /// Check current status - is the current plexus hash documented?
@@ -155,30 +125,26 @@ impl Changelog {
     async fn check(
         &self,
         current_hash: String,
-    ) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<ChangelogEvent, ChangelogError> {
+        let previous_hash = self.storage.get_last_hash().await.ok().flatten();
+        let hash_changed = previous_hash.as_ref() != Some(&current_hash);
+        let is_documented = self.storage.is_documented(&current_hash).await.unwrap_or(false);
 
-        stream! {
-            let previous_hash = storage.get_last_hash().await.ok().flatten();
-            let hash_changed = previous_hash.as_ref() != Some(&current_hash);
-            let is_documented = storage.is_documented(&current_hash).await.unwrap_or(false);
+        let message = if !hash_changed {
+            "Plexus hash unchanged".to_string()
+        } else if is_documented {
+            "Plexus change is documented".to_string()
+        } else {
+            format!("UNDOCUMENTED: Add changelog entry for hash '{current_hash}'")
+        };
 
-            let message = if !hash_changed {
-                "Plexus hash unchanged".to_string()
-            } else if is_documented {
-                "Plexus change is documented".to_string()
-            } else {
-                format!("UNDOCUMENTED: Add changelog entry for hash '{current_hash}'")
-            };
-
-            yield ChangelogEvent::StartupCheck {
-                current_hash,
-                previous_hash,
-                hash_changed,
-                is_documented,
-                message,
-            };
-        }
+        Ok(ChangelogEvent::StartupCheck {
+            current_hash,
+            previous_hash,
+            hash_changed,
+            is_documented,
+            message,
+        })
     }
 
     // ========== Queue Methods ==========
@@ -189,22 +155,12 @@ impl Changelog {
         &self,
         description: String,
         tags: Option<Vec<String>>,
-    ) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<ChangelogEvent, ChangelogError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let entry = QueueEntry::new(id, description, tags.unwrap_or_default());
 
-        stream! {
-            let id = uuid::Uuid::new_v4().to_string();
-            let entry = QueueEntry::new(id, description, tags.unwrap_or_default());
-
-            match storage.add_queue_entry(&entry).await {
-                Ok(()) => {
-                    yield ChangelogEvent::QueueAdded { entry };
-                }
-                Err(e) => {
-                    tracing::error!("Failed to add queue entry: {}", e);
-                }
-            }
-        }
+        self.storage.add_queue_entry(&entry).await?;
+        Ok(ChangelogEvent::QueueAdded { entry })
     }
 
     /// List all queue entries, optionally filtered by tag
@@ -212,19 +168,9 @@ impl Changelog {
     async fn queue_list(
         &self,
         tag: Option<String>,
-    ) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.list_queue_entries(tag.as_deref()).await {
-                Ok(entries) => {
-                    yield ChangelogEvent::QueueEntries { entries };
-                }
-                Err(e) => {
-                    tracing::error!("Failed to list queue entries: {}", e);
-                }
-            }
-        }
+    ) -> Result<ChangelogEvent, ChangelogError> {
+        let entries = self.storage.list_queue_entries(tag.as_deref()).await?;
+        Ok(ChangelogEvent::QueueEntries { entries })
     }
 
     /// List pending queue entries, optionally filtered by tag
@@ -232,19 +178,9 @@ impl Changelog {
     async fn queue_pending(
         &self,
         tag: Option<String>,
-    ) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.list_pending_queue_entries(tag.as_deref()).await {
-                Ok(entries) => {
-                    yield ChangelogEvent::QueueEntries { entries };
-                }
-                Err(e) => {
-                    tracing::error!("Failed to list pending queue entries: {}", e);
-                }
-            }
-        }
+    ) -> Result<ChangelogEvent, ChangelogError> {
+        let entries = self.storage.list_pending_queue_entries(tag.as_deref()).await?;
+        Ok(ChangelogEvent::QueueEntries { entries })
     }
 
     /// Get a specific queue entry by ID
@@ -252,19 +188,9 @@ impl Changelog {
     async fn queue_get(
         &self,
         id: String,
-    ) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.get_queue_entry(&id).await {
-                Ok(entry) => {
-                    yield ChangelogEvent::QueueItem { entry };
-                }
-                Err(e) => {
-                    tracing::error!("Failed to get queue entry: {}", e);
-                }
-            }
-        }
+    ) -> Result<ChangelogEvent, ChangelogError> {
+        let entry = self.storage.get_queue_entry(&id).await?;
+        Ok(ChangelogEvent::QueueItem { entry })
     }
 
     /// Mark a queue entry as complete
@@ -273,21 +199,15 @@ impl Changelog {
         &self,
         id: String,
         hash: String,
-    ) -> impl Stream<Item = ChangelogEvent> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.complete_queue_entry(&id, &hash).await {
-                Ok(Some(entry)) => {
-                    yield ChangelogEvent::QueueUpdated { entry };
-                }
-                Ok(None) => {
-                    tracing::warn!("Queue entry not found: {}", id);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to complete queue entry: {}", e);
-                }
-            }
-        }
+    ) -> Result<ChangelogEvent, ChangelogError> {
+        // PLX-118 behaviour delta, stated rather than papered over: "no such
+        // queue entry" used to be a `tracing::warn!` plus an EMPTY successful
+        // stream — indistinguishable at the caller from a successful update. It
+        // is now `ChangelogError::QueueEntryNotFound`, i.e. a Failed terminal.
+        self.storage
+            .complete_queue_entry(&id, &hash)
+            .await?
+            .map(|entry| ChangelogEvent::QueueUpdated { entry })
+            .ok_or(ChangelogError::QueueEntryNotFound(id))
     }
 }
