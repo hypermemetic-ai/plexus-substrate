@@ -170,7 +170,6 @@ pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations
     let cone = Cone::new(
         ConeStorageConfig {
             db_path: scope.db_path("cone", "cones.db"),
-            ..ConeStorageConfig::default()
         },
         arbor_storage.clone(),
     )
@@ -181,7 +180,6 @@ pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations
     let claudecode_storage = ClaudeCodeStorage::new(
         ClaudeCodeStorageConfig {
             db_path: scope.db_path("claudecode", "claudecode.db"),
-            ..ClaudeCodeStorageConfig::default()
         },
         arbor_storage,
     )
@@ -195,7 +193,6 @@ pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations
     // Initialize Mustache for template rendering
     let mustache = Mustache::new(MustacheStorageConfig {
         db_path: scope.db_path("mustache", "templates.db"),
-        ..MustacheStorageConfig::default()
     })
         .await
         .expect("Failed to initialize Mustache");
@@ -204,7 +201,6 @@ pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations
     let loopback = Arc::new(
         ClaudeCodeLoopback::new(LoopbackStorageConfig {
             db_path: scope.db_path("claudecode_loopback", "loopback.db"),
-            ..LoopbackStorageConfig::default()
         })
             .await
             .expect("Failed to initialize ClaudeCodeLoopback")
@@ -223,7 +219,6 @@ pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations
     let orcha_storage = Arc::new(
         OrchaStorage::new(OrchaStorageConfig {
             db_path: scope.db_path("orcha", "orcha.db"),
-            ..OrchaStorageConfig::default()
         })
             .await
             .expect("Failed to initialize Orcha storage")
@@ -233,7 +228,6 @@ pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations
     let pm_storage = Arc::new(
         PmStorage::new(PmStorageConfig {
             db_path: scope.db_path("pm", "pm.db"),
-            ..PmStorageConfig::default()
         })
             .await
             .expect("Failed to initialize PM storage")
@@ -242,7 +236,6 @@ pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations
     // Initialize Changelog for tracking plexus hash transitions
     let changelog = Changelog::new(ChangelogStorageConfig {
         db_path: scope.db_path("changelog", "changelog.db"),
-        ..ChangelogStorageConfig::default()
     })
         .await
         .expect("Failed to initialize Changelog");
@@ -256,7 +249,6 @@ pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations
     // Initialize Lattice DAG execution engine
     let lattice = Lattice::new(LatticeStorageConfig {
         db_path: scope.db_path("lattice", "lattice.db"),
-        ..LatticeStorageConfig::default()
     })
         .await
         .expect("Failed to initialize Lattice storage");
@@ -431,7 +423,7 @@ impl TenantExecution {
     /// PLX-129 scopes storage with, so a deployment cannot end up checking
     /// `is_active()` against one store and writing files under another.
     #[must_use]
-    pub fn admission(&self) -> &Arc<TenantAdmission> {
+    pub const fn admission(&self) -> &Arc<TenantAdmission> {
         &self.admission
     }
 

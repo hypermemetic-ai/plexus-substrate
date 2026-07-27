@@ -182,7 +182,8 @@ pub fn get_sessions_base_dir() -> PathBuf {
 /// rule compared against a non-canonical path silently no-ops. So:
 ///
 /// 1. `project_path` must be **exactly one normal path component** — this
-///    rejects `..`, `a/b`, `/etc` and `` before any filesystem call, the same
+///    rejects `..`, `a/b`, `/etc` and the empty string before any filesystem
+///    call, the same
 ///    step 2 `TenantRoot::resolve` keeps for the same reason;
 /// 2. join, then **canonicalize the join and compare it to the canonicalized
 ///    base** — which is what catches a symlink planted at
