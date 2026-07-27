@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -147,6 +147,10 @@ pub struct SystemEvent {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Get the base directory for Claude sessions
+///
+/// **The host default only.** A tenant's base comes from
+/// [`StorageScope::claude_sessions_root`](crate::activations::storage::StorageScope::claude_sessions_root);
+/// see [`SessionRoot`].
 pub fn get_sessions_base_dir() -> PathBuf {
     dirs::home_dir()
         .expect("Could not determine home directory")
@@ -154,16 +158,163 @@ pub fn get_sessions_base_dir() -> PathBuf {
         .join("projects")
 }
 
-/// Get the path to a session file
-pub fn get_session_path(project_path: &str, session_id: &str) -> PathBuf {
-    get_sessions_base_dir()
-        .join(project_path)
-        .join(format!("{session_id}.jsonl"))
+/// **PLX-129 — the base directory `claudecode.sessions_*` joins onto, and the
+/// check that join was missing.**
+///
+/// # The hole this closes
+///
+/// `sessions_list`, `sessions_get`, `sessions_import`, `sessions_export` and
+/// `sessions_delete` all take a `project_path` **straight off the wire** and,
+/// until now, joined it onto a process-global `~/.claude/projects` with no
+/// validation at all. `project_path = "../../.ssh"` read the operator's keys;
+/// `project_path = "../<other tenant>"` read another tenant's transcripts.
+/// PLX-130 named `claudecode.sessions_*` as a row and PLX-127 could not
+/// exclude `claudecode`, because it is the product.
+///
+/// Per-tenant sqlite files do nothing about this: it is not a database.
+/// PLX-129's requirement 2 is exactly this case — *"every filesystem path a
+/// per-tenant activation touches is tenant-prefixed. Storage is not only the
+/// database."*
+///
+/// # The rule, which is PLX-130's measured one
+///
+/// `canonicalize` **resolves** a path; it does not **constrain** one, and a
+/// rule compared against a non-canonical path silently no-ops. So:
+///
+/// 1. `project_path` must be **exactly one normal path component** — this
+///    rejects `..`, `a/b`, `/etc` and `` before any filesystem call, the same
+///    step 2 `TenantRoot::resolve` keeps for the same reason;
+/// 2. join, then **canonicalize the join and compare it to the canonicalized
+///    base** — which is what catches a symlink planted at
+///    `<base>/<project>` by whoever can write inside the base.
+///
+/// Step 2 is not redundant with step 1. Step 1 cannot see a symlink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRoot {
+    base: PathBuf,
+}
+
+impl SessionRoot {
+    /// Build a root over `base`. The base is an operator/composition choice —
+    /// `StorageScope` produces it — and is never caller input.
+    #[must_use]
+    pub fn new(base: impl Into<PathBuf>) -> Self {
+        Self { base: base.into() }
+    }
+
+    /// The host default, `~/.claude/projects`.
+    #[must_use]
+    pub fn host_default() -> Self {
+        Self::new(get_sessions_base_dir())
+    }
+
+    /// The unresolved base directory.
+    #[must_use]
+    pub fn base(&self) -> &Path {
+        &self.base
+    }
+
+    /// Step 1: is `project_path` usable as a single directory name?
+    ///
+    /// Kept separate and total so it can be tested on strings that never touch
+    /// a filesystem. Note it deliberately allows `.` *inside* a name —
+    /// real Claude Code project directories are slugs like
+    /// `-Users-x-.config-thing` — while refusing the components `.` and `..`.
+    #[must_use]
+    pub fn segment_is_safe(project_path: &str) -> bool {
+        if project_path.is_empty() || project_path.len() > 255 {
+            return false;
+        }
+        if project_path.bytes().any(|b| b == 0 || b < 0x20 || b == 0x7f) {
+            return false;
+        }
+        let p = Path::new(project_path);
+        p.components().count() == 1
+            && matches!(p.components().next(), Some(Component::Normal(_)))
+    }
+
+    /// `<base>/<project_path>`, proven to be inside `<base>`.
+    ///
+    /// `create` decides whether a missing directory is made (write paths) or
+    /// refused (read paths). Either way the containment check runs against a
+    /// canonical path.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the rule that fired, never the resolved host path — a
+    /// caller who guessed wrong should not learn the layout by guessing.
+    pub fn project_dir(&self, project_path: &str, create: bool) -> Result<PathBuf, String> {
+        if !Self::segment_is_safe(project_path) {
+            return Err(format!(
+                "project_path {project_path:?} is not a single directory name; \
+                 `..`, `/` and absolute paths are refused"
+            ));
+        }
+        if create {
+            std::fs::create_dir_all(&self.base)
+                .map_err(|e| format!("Failed to create session base: {e}"))?;
+        }
+        // Canonicalize the BASE first — trap 2. On macOS the base can easily
+        // sit under /tmp, which is a symlink to /private/tmp, and a comparison
+        // against the uncanonicalized spelling is a check that is not one.
+        let base = std::fs::canonicalize(&self.base)
+            .map_err(|e| format!("Session base is unresolvable: {e}"))?;
+        let joined = base.join(project_path);
+        if create {
+            std::fs::create_dir_all(&joined)
+                .map_err(|e| format!("Failed to create session directory: {e}"))?;
+        }
+        if !joined.exists() {
+            // Nothing to constrain and nothing to read. Report the lexical
+            // path, which is inside the base by construction of step 1.
+            return Ok(joined);
+        }
+        // Resolve … then constrain — trap 1.
+        let canonical = std::fs::canonicalize(&joined)
+            .map_err(|e| format!("Session directory is unresolvable: {e}"))?;
+        if canonical.starts_with(&base) {
+            Ok(canonical)
+        } else {
+            Err(format!(
+                "project_path {project_path:?} resolves outside the session root"
+            ))
+        }
+    }
+
+    /// Get the path to a session file, contained.
+    ///
+    /// # Errors
+    ///
+    /// As [`SessionRoot::project_dir`], plus a refusal if `session_id` is not
+    /// a single safe component — it is caller input too, and a `session_id` of
+    /// `../../x` would otherwise climb straight back out of the directory the
+    /// step above just proved.
+    pub fn session_path(
+        &self,
+        project_path: &str,
+        session_id: &str,
+        create: bool,
+    ) -> Result<PathBuf, String> {
+        if !Self::segment_is_safe(session_id) {
+            return Err(format!(
+                "session_id {session_id:?} is not a single path component"
+            ));
+        }
+        Ok(self
+            .project_dir(project_path, create)?
+            .join(format!("{session_id}.jsonl")))
+    }
+}
+
+impl Default for SessionRoot {
+    fn default() -> Self {
+        Self::host_default()
+    }
 }
 
 /// List all sessions for a project
-pub async fn list_sessions(project_path: &str) -> Result<Vec<String>, String> {
-    let dir = get_sessions_base_dir().join(project_path);
+pub async fn list_sessions(root: &SessionRoot, project_path: &str) -> Result<Vec<String>, String> {
+    let dir = root.project_dir(project_path, false)?;
 
     if !dir.exists() {
         return Ok(vec![]);
@@ -192,10 +343,11 @@ pub async fn list_sessions(project_path: &str) -> Result<Vec<String>, String> {
 
 /// Read all events from a session file
 pub async fn read_session(
+    root: &SessionRoot,
     project_path: &str,
     session_id: &str,
 ) -> Result<Vec<SessionEvent>, String> {
-    let path = get_session_path(project_path, session_id);
+    let path = root.session_path(project_path, session_id, false)?;
 
     if !path.exists() {
         return Err(format!("Session not found: {session_id}"));
@@ -232,11 +384,12 @@ pub async fn read_session(
 
 /// Append an event to a session file
 pub async fn append_to_session(
+    root: &SessionRoot,
     project_path: &str,
     session_id: &str,
     event: &SessionEvent,
 ) -> Result<(), String> {
-    let path = get_session_path(project_path, session_id);
+    let path = root.session_path(project_path, session_id, true)?;
 
     // Ensure directory exists
     if let Some(parent) = path.parent() {
@@ -265,8 +418,12 @@ pub async fn append_to_session(
 }
 
 /// Delete a session file
-pub async fn delete_session(project_path: &str, session_id: &str) -> Result<(), String> {
-    let path = get_session_path(project_path, session_id);
+pub async fn delete_session(
+    root: &SessionRoot,
+    project_path: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let path = root.session_path(project_path, session_id, false)?;
 
     if !path.exists() {
         return Err(format!("Session not found: {session_id}"));
@@ -288,11 +445,12 @@ pub async fn delete_session(project_path: &str, session_id: &str) -> Result<(), 
 /// Creates a tree structure matching the session conversation flow
 pub async fn import_to_arbor(
     arbor: &ArborStorage,
+    root: &SessionRoot,
     project_path: &str,
     session_id: &str,
     owner_id: &str,
 ) -> Result<TreeId, String> {
-    let events = read_session(project_path, session_id).await?;
+    let events = read_session(root, project_path, session_id).await?;
 
     // Create new tree
     let metadata = serde_json::json!({
@@ -400,6 +558,7 @@ pub async fn import_to_arbor(
 /// Converts arbor node structure back to claude session format
 pub async fn export_from_arbor(
     arbor: &ArborStorage,
+    root: &SessionRoot,
     tree_id: &TreeId,
     project_path: &str,
     session_id: &str,
@@ -585,7 +744,7 @@ pub async fn export_from_arbor(
 
     // Write to session file
     for event in session_events {
-        append_to_session(project_path, session_id, &event).await?;
+        append_to_session(root, project_path, session_id, &event).await?;
     }
 
     Ok(())

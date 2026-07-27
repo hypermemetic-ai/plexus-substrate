@@ -14,6 +14,9 @@
 
 use std::sync::{Arc, Once};
 
+use plexus_idp::store::IdentityStore;
+use plexus_substrate::tenancy::TenantAdmission;
+
 use plexus_substrate::{
     build_activations, compose_host_hub, compose_tenant_hub, SubstrateActivations, TenantSurface,
     TENANT_EXCLUDED_ACTIVATIONS,
@@ -241,7 +244,43 @@ fn caller_of(tenant: &str) -> plexus_core::plexus::AuthContext {
     )
 }
 
-/// The whole thing, wired: `build_plexus_rpc()`'s hub, a real caller, real
+/// A deployment with an identity store but no admission is one that cannot
+/// prove a tenant exists — so PLX-129 refuses to serve one storage of its own,
+/// and therefore refuses to serve it at all.
+///
+/// This is the half of `build_plexus_rpc()`'s behaviour that CHANGED at M4·E,
+/// pinned so the change is a decision rather than a drift. PLX-127 shipped an
+/// untenanted `build_plexus_rpc()` whose mount admitted anyone their claims
+/// said they were and handed them the process-global storage set. That is
+/// exactly the shape PLX-127 declined for `claudecode` — "registering it would
+/// ship a known cross-tenant read" — and the same answer applies once the
+/// per-tenant alternative exists.
+///
+/// The mount itself is unchanged: still registered, still rendered, still
+/// `tenants/{id}`. Only the factory refuses.
+#[tokio::test]
+async fn without_an_identity_store_no_tenant_is_served_but_the_mount_remains() {
+    redirect_home();
+    let hub = {
+        let _guard = STORAGE_INIT.lock().await;
+        plexus_substrate::build_plexus_rpc().await
+    };
+    let b = caller_of("tenant-b");
+
+    assert!(
+        hub.route("tenants.tenant-b.echo.once", serde_json::json!({"message": "hi"}), Some(&b))
+            .await
+            .is_err(),
+        "a deployment with no way to resolve a TenantRecord must serve no tenant,          because the only storage it could give one is the host's"
+    );
+
+    // …and the shape is still there, so this is a refusal and not a deletion.
+    let connectome = serde_json::to_string(&hub.connectome()).expect("connectome");
+    assert!(connectome.contains("tenants/{id}"), "the mount is not rendered");
+    assert!(hub.list_methods().iter().any(|m| m.starts_with("bash.")));
+}
+
+/// The whole thing, wired: the real composition root, a real caller, real
 /// dispatch.
 ///
 /// The sharpest assertion here is the middle one. Tenant B is **correctly
@@ -249,12 +288,34 @@ fn caller_of(tenant: &str) -> plexus_core::plexus::AuthContext {
 /// it was never registered on the composition B descends into. That is the
 /// difference between a deny list and mount composition, and it is why PLX-130
 /// put composition first.
+///
+/// **PLX-129 changed the SETUP of this test and none of its assertions.** The
+/// hub now comes from `build_plexus_rpc_with_admission` with an identity store
+/// that has actually minted tenant-a and tenant-b, because a tenant subtree is
+/// no longer served without a `TenantRecord` to scope its storage by. Every
+/// assertion below is PLX-127's, verbatim.
 #[tokio::test]
 async fn end_to_end_a_tenant_reaches_its_own_mount_and_nothing_else() {
     redirect_home();
+    let scratch = tempfile::tempdir().expect("tenant roots");
+    let store = Arc::new(
+        IdentityStore::open(
+            scratch
+                .path()
+                .join("identity.db")
+                .to_str()
+                .expect("utf-8 path"),
+        )
+        .await
+        .expect("identity store"),
+    );
+    store.mint_tenant("tenant-a", "Tenant A").await.expect("mint a");
+    store.mint_tenant("tenant-b", "Tenant B").await.expect("mint b");
+    let admission = Arc::new(TenantAdmission::new(store, scratch.path().join("roots")));
+
     let hub = {
         let _guard = STORAGE_INIT.lock().await;
-        plexus_substrate::build_plexus_rpc().await
+        plexus_substrate::build_plexus_rpc_with_admission(Some(admission), None).await
     };
     let b = caller_of("tenant-b");
 

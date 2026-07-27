@@ -2,6 +2,7 @@ use std::io::Write;
 
 use plexus_substrate::activations::arbor::{ArborConfig, ArborStorage};
 use plexus_substrate::activations::claudecode::sessions;
+use plexus_substrate::activations::claudecode::sessions::SessionRoot;
 use plexus_substrate::activations::claudecode::{
     AssistantMessage, ContentBlock, NodeEvent, SessionEvent,
 };
@@ -21,9 +22,16 @@ async fn test_session_import_export_roundtrip() {
     println!("\n=== Testing Session Import/Export Round-trip ===\n");
 
     // 1. Create a simple test session
-    let project_path = temp_dir.path().join("test-project");
-    std::fs::create_dir_all(&project_path).unwrap();
-    let project_str = project_path.to_str().unwrap();
+    //
+    // PLX-129: this fixture used to pass an ABSOLUTE path as `project_path`,
+    // which `Path::join` silently honours by DISCARDING the base — that is the
+    // traversal this ticket closed, and a test depending on it is evidence the
+    // hole was reachable rather than theoretical. The session root is now
+    // explicit and the project is a name inside it. Every assertion below is
+    // unchanged.
+    let root = SessionRoot::new(temp_dir.path());
+    let project_str = "test-project";
+    std::fs::create_dir_all(temp_dir.path().join(project_str)).unwrap();
     let session_id = "test-session-123";
 
     println!("1. Creating test session...");
@@ -59,7 +67,7 @@ async fn test_session_import_export_roundtrip() {
     ];
 
     // Write session file
-    let session_path = sessions::get_session_path(project_str, session_id);
+    let session_path = root.session_path(project_str, session_id, true).unwrap();
     std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
     let mut session_file = std::fs::File::create(&session_path).unwrap();
     for event in &test_events {
@@ -71,7 +79,7 @@ async fn test_session_import_export_roundtrip() {
 
     // 2. Import to arbor
     println!("2. Importing session to arbor...");
-    let tree_id = sessions::import_to_arbor(&storage, project_str, session_id, "test-user")
+    let tree_id = sessions::import_to_arbor(&storage, &root, project_str, session_id, "test-user")
         .await
         .unwrap();
     println!("✓ Imported to tree: {tree_id}\n");
@@ -92,14 +100,14 @@ async fn test_session_import_export_roundtrip() {
     // 4. Export back to JSONL
     println!("4. Exporting tree back to JSONL...");
     let export_session_id = "test-session-exported";
-    sessions::export_from_arbor(&storage, &tree_id, project_str, export_session_id)
+    sessions::export_from_arbor(&storage, &root, &tree_id, project_str, export_session_id)
         .await
         .unwrap();
     println!("✓ Exported to session: {export_session_id}\n");
 
     // 5. Read exported session
     println!("5. Reading exported session...");
-    let exported_events = sessions::read_session(project_str, export_session_id)
+    let exported_events = sessions::read_session(&root, project_str, export_session_id)
         .await
         .unwrap();
     println!("✓ Exported session has {} events\n", exported_events.len());
@@ -211,12 +219,12 @@ async fn test_view_collapse_export() {
 
     // 3. Export view tree to JSONL
     println!("3. Exporting view tree to JSONL...");
-    let project_path = temp_dir.path().join("test-project");
-    std::fs::create_dir_all(&project_path).unwrap();
-    let project_str = project_path.to_str().unwrap();
+    let root = SessionRoot::new(temp_dir.path());
+    let project_str = "test-project";
+    std::fs::create_dir_all(temp_dir.path().join(project_str)).unwrap();
     let session_id = "view-export-test";
 
-    match sessions::export_from_arbor(&storage, &view_tree_id, project_str, session_id).await {
+    match sessions::export_from_arbor(&storage, &root, &view_tree_id, project_str, session_id).await {
         Ok(()) => println!("✓ Exported view to session\n"),
         Err(e) => {
             eprintln!("ERROR exporting: {e}");
@@ -225,13 +233,13 @@ async fn test_view_collapse_export() {
     }
 
     // Check if file was created
-    let session_path = sessions::get_session_path(project_str, session_id);
+    let session_path = root.session_path(project_str, session_id, true).unwrap();
     println!("Session file should be at: {session_path:?}");
     println!("File exists: {}", session_path.exists());
 
     // 4. Read exported session and verify merged content
     println!("4. Verifying exported content...");
-    let exported_events = match sessions::read_session(project_str, session_id).await {
+    let exported_events = match sessions::read_session(&root, project_str, session_id).await {
         Ok(events) => events,
         Err(e) => {
             eprintln!("ERROR reading session: {e}");

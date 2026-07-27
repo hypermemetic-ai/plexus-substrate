@@ -9,7 +9,9 @@ use plexus_auth_core::tenant::TenantId;
 use plexus_sandbox::docker::{DockerConfig, DockerSandbox};
 use plexus_sandbox::Sandbox;
 
+use crate::activations::claudecode::sessions::SessionRoot;
 use crate::activations::claudecode::Confinement;
+use crate::activations::storage::StorageScope;
 use crate::tenancy::TenantAdmission;
 
 use crate::activations::arbor::{Arbor, ArborConfig, HandleResolvers};
@@ -122,55 +124,126 @@ impl Default for TenantSurface {
 /// Returns the activation set and the `Orcha` clone the caller needs for the
 /// post-assembly recovery pass.
 pub async fn build_activations() -> (SubstrateActivations, Orcha) {
+    build_activations_in(&StorageScope::host()).await
+}
+
+/// **PLX-129 — every storage path in substrate, in one function, derived from
+/// one argument.**
+///
+/// This is the whole of criterion c2 ("no per-tenant storage path is assembled
+/// from a string at a call site; every one derives from the injected
+/// `TenantId`"), and it is a *structural* answer rather than a reviewed one:
+/// there is no other place in this crate that decides where an activation's
+/// database lives. Each `*Config::default()` still computes the host path in
+/// its own `Default` impl, and each is then overwritten here — so the host
+/// surface is bit-identical to what it always was, and every other scope is
+/// this function's output.
+///
+/// The nine `db_path` calls below are also the storage-surface audit PLX-129
+/// c4 asks for, in executable form: if a tenth activation gains storage and
+/// does not appear here, it silently keeps the host path — which is why
+/// `every_tenant_database_is_inside_the_tenant_root` walks the composed hub
+/// and asserts on the *files that exist*, not on this list.
+///
+/// # Two surfaces that are NOT `~/.plexus/substrate/activations`
+///
+/// - **`registry`** keeps its database under `dirs::config_dir()/plexus`, an
+///   entirely different tree. It is registered on the tenant hub and it is
+///   writable (`registry.register`), so a shared one is a cross-tenant write.
+///   Scoped here like the rest.
+/// - **`claudecode`'s session transcripts** live in Claude Code's own
+///   `~/.claude/projects`, and `claudecode.sessions_*` joins a *caller-supplied*
+///   `project_path` onto that base. See [`StorageScope::claude_sessions_root`]
+///   and `SessionRoot`.
+pub async fn build_activations_in(scope: &StorageScope) -> (SubstrateActivations, Orcha) {
 
     // Initialize Arbor first (other activations depend on its storage)
-    let arbor = Arbor::new(ArborConfig::default())
+    let arbor = Arbor::new(ArborConfig {
+        db_path: scope.db_path("arbor", "arbor.db"),
+        ..ArborConfig::default()
+    })
         .await
         .expect("Failed to initialize Arbor");
     let arbor_storage = arbor.storage();
 
     // Initialize Cone with shared Arbor storage
-    let cone = Cone::new(ConeStorageConfig::default(), arbor_storage.clone())
+    let cone = Cone::new(
+        ConeStorageConfig {
+            db_path: scope.db_path("cone", "cones.db"),
+            ..ConeStorageConfig::default()
+        },
+        arbor_storage.clone(),
+    )
         .await
         .expect("Failed to initialize Cone");
 
     // Initialize ClaudeCode with shared Arbor storage
     let claudecode_storage = ClaudeCodeStorage::new(
-        ClaudeCodeStorageConfig::default(),
+        ClaudeCodeStorageConfig {
+            db_path: scope.db_path("claudecode", "claudecode.db"),
+            ..ClaudeCodeStorageConfig::default()
+        },
         arbor_storage,
     )
     .await
     .expect("Failed to initialize ClaudeCode storage");
-    let claudecode: ClaudeCode = ClaudeCode::with_context_type(Arc::new(claudecode_storage));
+    // PLX-129: the session transcript directory is storage too, and it is the
+    // one an unchecked join reaches. `SessionRoot` is what makes the join safe.
+    let claudecode: ClaudeCode = ClaudeCode::with_context_type(Arc::new(claudecode_storage))
+        .with_session_root(SessionRoot::new(scope.claude_sessions_root()));
 
     // Initialize Mustache for template rendering
-    let mustache = Mustache::new(MustacheStorageConfig::default())
+    let mustache = Mustache::new(MustacheStorageConfig {
+        db_path: scope.db_path("mustache", "templates.db"),
+        ..MustacheStorageConfig::default()
+    })
         .await
         .expect("Failed to initialize Mustache");
 
     // Initialize ClaudeCode Loopback for tool permission routing
     let loopback = Arc::new(
-        ClaudeCodeLoopback::new(LoopbackStorageConfig::default())
+        ClaudeCodeLoopback::new(LoopbackStorageConfig {
+            db_path: scope.db_path("claudecode_loopback", "loopback.db"),
+            ..LoopbackStorageConfig::default()
+        })
             .await
             .expect("Failed to initialize ClaudeCodeLoopback")
     );
 
-    // Initialize Orcha storage for multi-agent orchestration
+    // Initialize Orcha storage for multi-agent orchestration.
+    //
+    // NOTE, and it is a real one: `orcha` is in `TENANT_EXCLUDED_ACTIVATIONS`
+    // and is never registered on a tenant hub, so these two databases are
+    // built and never reachable in a tenant scope. They are still scoped
+    // rather than left pointing at the host's, because a construction path
+    // that keeps a host handle alive inside a tenant's activation set is one
+    // `register` away from being a leak. The cost is two empty files per
+    // tenant; the alternative is a live handle to the host's orchestration
+    // history sitting in a tenant's object graph.
     let orcha_storage = Arc::new(
-        OrchaStorage::new(OrchaStorageConfig::default())
+        OrchaStorage::new(OrchaStorageConfig {
+            db_path: scope.db_path("orcha", "orcha.db"),
+            ..OrchaStorageConfig::default()
+        })
             .await
             .expect("Failed to initialize Orcha storage")
     );
 
     // Initialize PM storage for ticket→node mapping
     let pm_storage = Arc::new(
-        PmStorage::new(PmStorageConfig::default())
+        PmStorage::new(PmStorageConfig {
+            db_path: scope.db_path("pm", "pm.db"),
+            ..PmStorageConfig::default()
+        })
             .await
             .expect("Failed to initialize PM storage")
     );
 
     // Initialize Changelog for tracking plexus hash transitions
-    let changelog = Changelog::new(ChangelogStorageConfig::default())
+    let changelog = Changelog::new(ChangelogStorageConfig {
+        db_path: scope.db_path("changelog", "changelog.db"),
+        ..ChangelogStorageConfig::default()
+    })
         .await
         .expect("Failed to initialize Changelog");
 
@@ -181,12 +254,22 @@ pub async fn build_activations() -> (SubstrateActivations, Orcha) {
     // let jsexec = JsExec::new(JsExecConfig::default());  // temporarily disabled
 
     // Initialize Lattice DAG execution engine
-    let lattice = Lattice::new(LatticeStorageConfig::default())
+    let lattice = Lattice::new(LatticeStorageConfig {
+        db_path: scope.db_path("lattice", "lattice.db"),
+        ..LatticeStorageConfig::default()
+    })
         .await
         .expect("Failed to initialize Lattice storage");
 
-    // Initialize Registry for backend discovery
-    let registry = Registry::with_defaults()
+    // Initialize Registry for backend discovery.
+    //
+    // PLX-129: `Registry::with_defaults()` resolves to
+    // `dirs::config_dir()/plexus/{registry.db,backends.toml}` — a tree outside
+    // `~/.plexus` entirely, which is why an audit that greps for
+    // `activation_db_path` misses it. `registry` IS registered on the tenant
+    // hub and `registry.register` writes, so a shared one is a cross-tenant
+    // write channel. Scoped, including the TOML.
+    let registry = Registry::new(scope.registry_config())
         .await
         .expect("Failed to initialize Registry");
 
@@ -344,6 +427,14 @@ impl TenantExecution {
         self
     }
 
+    /// The admission this execution resolves tenants through — the same one
+    /// PLX-129 scopes storage with, so a deployment cannot end up checking
+    /// `is_active()` against one store and writing files under another.
+    #[must_use]
+    pub fn admission(&self) -> &Arc<TenantAdmission> {
+        &self.admission
+    }
+
     /// The confinement for one tenant.
     #[must_use]
     pub fn confinement_for(&self, tenant: &TenantId) -> Confinement {
@@ -360,6 +451,69 @@ impl TenantExecution {
     }
 }
 
+// ============================================================================
+// PLX-128 (M4·D) — one activation set per tenant, built once
+// ============================================================================
+
+/// The live per-tenant activation sets, keyed by the **proven** tenant id.
+///
+/// # Why a cache and not just "build it each time"
+///
+/// A `SubstrateActivations` is ten sqlite pools and ten migration runs.
+/// Rebuilding one per RPC call would be slow, and — worse — would be
+/// *incorrect* for the activations that hold in-memory state beside their
+/// database: `LoopbackStorage`'s pending tool-permission notifiers,
+/// `LatticeStorage`'s per-graph `Notify`, `ClaudeCodeStorage`'s stream
+/// buffers. A second instance would not see the first one's waiters, so a
+/// permission prompt would hang forever. **The instance has to be stable per
+/// tenant**, which is the other half of what "per-tenant instances" means.
+///
+/// # What is NOT cached, deliberately
+///
+/// Admission. The record lookup and `is_active()` check run on **every**
+/// dispatch, before this map is consulted — the design PLX-151 arrived at for
+/// the same reason and found better than the one it intended: *suspending a
+/// tenant stops its next turn rather than merely its next mount.* A cached hub
+/// is unreachable the moment the record stops being active, because the
+/// caller never gets past the admission to ask for it.
+#[derive(Clone, Default)]
+struct TenantInstances {
+    hubs: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<DynamicHub>>>>,
+}
+
+impl TenantInstances {
+    /// The hub for this tenant, built on first use.
+    ///
+    /// `confinement` is used only on a miss. It is a pure function of the
+    /// tenant id (`TenantExecution::confinement_for`), so a later call cannot
+    /// have wanted a different one.
+    async fn hub_for(
+        &self,
+        storage_root: &crate::tenancy::TenantStorageRoot,
+        surface: TenantSurface,
+        confinement: Option<Confinement>,
+    ) -> Option<Arc<DynamicHub>> {
+        let key = storage_root.tenant().as_str().to_owned();
+        let mut hubs = self.hubs.lock().await;
+        if let Some(hub) = hubs.get(&key) {
+            return Some(Arc::clone(hub));
+        }
+        // Held across the await on purpose: two concurrent first calls for one
+        // tenant must not both run migrations against the same files.
+        // `OrchaStorage::new` does an unguarded `ALTER TABLE … ADD COLUMN`, so
+        // a race there is a hard error, not a slow path.
+        let scope = StorageScope::for_tenant(storage_root);
+        let (activations, _orcha) = build_activations_in(&scope).await;
+        let hub = Arc::new(compose_tenant_hub_confined(
+            &activations,
+            surface,
+            confinement,
+        ));
+        hubs.insert(key, Arc::clone(&hub));
+        Some(hub)
+    }
+}
+
 /// Build the hub, optionally with per-tenant confined execution.
 ///
 /// `None` is the untenanted deployment: `claudecode` is absent from the tenant
@@ -368,55 +522,120 @@ impl TenantExecution {
 pub async fn build_plexus_rpc_with_tenancy(
     tenancy: Option<TenantExecution>,
 ) -> Arc<DynamicHub> {
+    let admission = tenancy.as_ref().map(|t| Arc::clone(t.admission()));
+    build_plexus_rpc_with_admission(admission, tenancy).await
+}
+
+/// The full composition root: storage tenancy and execution tenancy, named
+/// separately because they are separate capabilities.
+///
+/// PLX-151 folded [`TenantAdmission`] inside [`TenantExecution`], which was
+/// right for that ticket — the admission existed to pick a *confinement* root,
+/// and a deployment with no sandbox had no use for one. PLX-129 changes that:
+/// a tenanted deployment needs an admission to scope its **databases**, and
+/// that need does not depend on owning a container runtime. So the two are
+/// parameters, and `build_plexus_rpc_with_tenancy` is the PLX-151 shape,
+/// preserved, with the admission taken out of the execution it already holds.
+///
+/// # What `None` admission means, and why it is not a hole
+///
+/// `None` is a deployment with no identity store — `build_plexus_rpc()`, and
+/// the shipped binary. The mount is still registered (its *shape* is part of
+/// the surface, and PLX-127's connectome assertions are about the shape), but
+/// **the factory refuses every tenant**: with no store there is no
+/// `TenantRecord`, with no record there is no [`TenantStorageRoot`], and with
+/// no storage root every tenant would land back on the one process-global set
+/// of files. Serving that is the exact thing PLX-127 declined to do for
+/// `claudecode`, for the exact reason — *registering it would ship a known
+/// cross-tenant read* — so it is declined here too, by returning `None` from
+/// the factory, which the mount renders identically to a tenant that does not
+/// exist.
+///
+/// [`TenantStorageRoot`]: crate::tenancy::TenantStorageRoot
+pub async fn build_plexus_rpc_with_admission(
+    admission: Option<Arc<TenantAdmission>>,
+    tenancy: Option<TenantExecution>,
+) -> Arc<DynamicHub> {
     let (activations, orcha_for_recovery) = build_activations().await;
     let changelog = activations.changelog.clone();
     let activations = Arc::new(activations);
 
     // PLX-127: the host hub is what it always was. The tenant hub is a
-    // DIFFERENT composition of the SAME activations, and the difference is the
-    // exclusion list — see `TENANT_EXCLUDED_ACTIVATIONS`.
+    // DIFFERENT composition, and the difference is the exclusion list — see
+    // `TENANT_EXCLUDED_ACTIVATIONS`.
+    //
+    // PLX-128 narrows that sentence in one word. It used to be a different
+    // composition of the *same activations*; it is now a different composition
+    // of *the same kinds of* activation, built per tenant against that
+    // tenant's own `StorageScope`. The exclusion list is unchanged and is
+    // still applied by `compose_tenant_hub_confined`, so surface isolation and
+    // data isolation are two independent mechanisms rather than one mechanism
+    // trusted twice.
     //
     // PLX-151: the flag and the capability are one fact. `claudecode` is in a
     // tenant's surface exactly when this deployment has a sandbox to put it in.
-    let host_activations = Arc::clone(&activations);
     let tenant_surface = TenantSurface {
         claudecode_is_sandboxed: tenancy.is_some(),
     };
     let tenancy_for_factory = tenancy.clone();
+    let admission_for_factory = admission.clone();
+    let instances = TenantInstances::default();
     let factory: TenantSubtreeFactory = Arc::new(move |admitted: &AdmittedTenant| {
         // Reached ONLY with an `AdmittedTenant` in hand, which only
         // `TenantMountGate::admit` can mint. See plexus-core's
         // `plexus::tenant_mount` for why that is the whole of "verify before
         // instantiate".
-        //
-        // RESIDUAL, stated rather than papered over: every tenant currently
-        // gets the same storage handles, because `build_plexus_rpc` builds
-        // each storage from `*Config::default()` — one process-global path
-        // with no tenant component (PLX-130 row B4). This ticket delivers
-        // SURFACE isolation (which activations exist under a tenant) and the
-        // gate in front of it. DATA isolation is PLX-128 (M4·D, per-tenant
-        // instances) and PLX-129 (M4·E, per-tenant storage), and PLX-130 is
-        // explicit that M4·E's value is conditional on these exclusions being
-        // in place — which is the order this ticket lands in.
-        //
-        // PLX-151: the confinement is per tenant, and it is built from the
-        // ADMITTED id — `admitted.id()`, which only `TenantMountGate::admit`
-        // can have produced — never from a segment the caller spelled.
-        let confinement = match tenancy_for_factory.as_ref() {
-            Some(t) => Some(t.confinement_for(admitted.id())),
-            // A tenanted surface with no sandbox is refused outright rather
-            // than served with an unconfined `claudecode` in it. `None` here is
-            // the `Option` PLX-127 put on this factory "precisely so a composer
-            // can refuse".
-            None if tenant_surface.claudecode_is_sandboxed => return None,
-            None => None,
-        };
+        let tenancy = tenancy_for_factory.clone();
+        let admission = admission_for_factory.clone();
+        let instances = instances.clone();
+        Box::pin(async move {
+            // ── PLX-128's amendment, discharged. ───────────────────────────
+            // `admitted.id()` is unforgeable but it is still only the
+            // *identifier*: it proves the caller's context resolved to this
+            // string, not that a tenant row exists or is live. PLX-125 draws
+            // that line deliberately and PLX-127 restated it — "existence and
+            // activity are the composer's obligation, and the composer
+            // discharges it by making its factory refuse."
+            //
+            // This is that refusal. `tenant_storage` resolves the sealed
+            // `TenantRecord`, checks `is_active()`, and derives the storage
+            // root from `record.id()` — so what scopes the databases below is
+            // the PROOF, not the identifier. There is no branch that reaches
+            // per-tenant storage without it.
+            let admission = admission?;
+            let storage_root = match admission.tenant_storage(admitted.id()).await {
+                Ok(root) => root,
+                Err(refusal) => {
+                    if refusal.is_operator_actionable() {
+                        tracing::error!(%refusal, "tenant subtree refused");
+                    } else {
+                        tracing::debug!(%refusal, "tenant subtree refused");
+                    }
+                    return None;
+                }
+            };
 
-        Some(Arc::new(compose_tenant_hub_confined(
-            &Arc::clone(&host_activations),
-            tenant_surface,
-            confinement,
-        )))
+            // PLX-151: the confinement is per tenant, and it is built from the
+            // ADMITTED id — never from a segment the caller spelled.
+            let confinement = match tenancy.as_ref() {
+                Some(t) => Some(t.confinement_for(admitted.id())),
+                // A tenanted surface with no sandbox is refused outright
+                // rather than served with an unconfined `claudecode` in it.
+                None if tenant_surface.claudecode_is_sandboxed => return None,
+                None => None,
+            };
+
+            // ── PLX-128 proper: the instance, not the surface. ─────────────
+            // Before M4·D this line handed back the HOST activation set. Now
+            // every tenant gets activations built against its own
+            // `StorageScope`, which means its own sqlite files, and — the
+            // PLX-111 dividend — its own `HandleResolvers`, minted inside
+            // `build_activations_in` from that tenant's own cone and
+            // claudecode. A resolver map built per tenant has no edge to gate.
+            instances
+                .hub_for(&storage_root, tenant_surface, confinement)
+                .await
+        })
     });
 
     let mount = TenantMount::new(
