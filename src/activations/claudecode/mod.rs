@@ -13,7 +13,7 @@ pub use storage::{ClaudeCodeStorage, ClaudeCodeStorageConfig};
 pub use sessions::{AssistantEvent, AssistantMessage, ContentBlock, SessionEvent, UserEvent, UserMessage};
 pub use types::{
     BufferedEvent, ChatEvent, ChatStartOk, ChatUsage, ClaudeCodeConfig,
-    ClaudeCodeError, ClaudeCodeHandle, ClaudeCodeId, ClaudeCodeInfo, CreateResult, DeleteOk,
+    ClaudeCodeError, ClaudeCodeHandle, ClaudeCodeId, ClaudeCodeInfo, CreateOk, DeleteOk,
     ForkOk, GetOk, ListOk, Message, MessageId, MessageRole, Model,
     NodeEvent, PollOk, Position, RawClaudeEvent, RawContentBlock, RawMessage,
     SessionsDeleteOk, SessionsExportOk, SessionsGetOk, SessionsImportOk, SessionsListOk,

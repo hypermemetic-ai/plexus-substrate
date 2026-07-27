@@ -73,6 +73,46 @@ LANG=C.UTF-8 synapse substrate orcha run_tickets_files \
 
 ---
 
+## Wire compatibility — breaking change in M2
+
+**If you parse substrate responses, read this before upgrading.**
+
+M2 converted 86 methods from "yield exactly once, then end the stream" to a unary
+`Result`. Routing did not change — a method that was served as JSON is still
+served as JSON, and a method that was served as SSE is still served as SSE — but
+**the response body changed shape** for every one of those 86 methods:
+
+| | JSON body |
+|---|---|
+| before | `{"data":[payload, {"stop":…,"value":null}]}` |
+| after  | `{"data":[{"stop":…,"value":payload}]}` |
+
+Two things moved at once: the `data` array is **one element shorter**, and the
+payload is now **nested inside `stop.value`** instead of sitting alongside an
+empty terminal. A client that read `data[0]` for the payload will now read the
+terminal; a client that read `data[data.length - 1].value` expecting `null` will
+now get the payload. `echo.ping` shipped this first; the rest followed.
+
+Failures moved with it. A method that previously signalled failure by yielding a
+domain `…Result::Err { message }` on the success channel now terminates the turn
+with an error: the code is at `content.stop.error.code` (a dotted string such as
+`claudecode.session_not_found`), the human message at `.message`, and a
+serializable domain error at `.details`.
+
+Two further changes in the same release:
+
+- **`lattice.execute` and `bash.execute` now answer `text/event-stream`** over
+  the HTTP gateway instead of one buffered `application/json` document. Both
+  genuinely stream; they had simply never declared it. In-process callers and
+  the MCP gateway are unaffected.
+- **`orcha.run_tickets` and `orcha.run_tickets_async_files` no longer emit
+  `GraphStarted` before failing** on a nonexistent `working_directory`. That path
+  used to emit `GraphStarted` and then `Failed`; it now emits `Failed` alone, and
+  fails before a graph is built, so no `graph_id` is allocated for a run that
+  cannot start.
+
+---
+
 ## See also
 
 - [`docs/activations/orcha/README.md`](docs/activations/orcha/README.md) — Orcha: multi-agent orchestration

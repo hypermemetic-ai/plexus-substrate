@@ -45,7 +45,16 @@ version = "1.0.0",
 description = "Execute bash commands and stream output")]
 impl Bash {
     /// Execute a bash command and stream stdout, stderr, and exit code
-    #[plexus_macros::method]
+    ///
+    /// PLX-133 item 6: `streaming` is declared. This method genuinely multi-shots
+    /// — the point of it is incremental stdout/stderr — and PLX-109 §2b's "the
+    /// declared flag is 100% precise in substrate" was a claim about precision,
+    /// not recall: this method and `lattice.execute` streamed without declaring
+    /// it. **Wire consequence**: over the HTTP gateway `bash.execute` now answers
+    /// `text/event-stream` instead of one buffered `application/json` body, so a
+    /// long-running command's output arrives as it is produced instead of after
+    /// the process exits. The MCP gateway does not read this flag.
+    #[plexus_macros::method(streaming)]
     async fn execute(&self, command: String) -> impl Stream<Item = BashEvent> + Send + 'static {
         self.executor.execute(&command).await
     }

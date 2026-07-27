@@ -331,19 +331,6 @@ pub struct BufferedEvent {
 // Each method returns exactly what it needs - no shared enums
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Result of creating a session
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CreateResult {
-    #[serde(rename = "created")]
-    Ok {
-        id: ClaudeCodeId,
-        head: Position,
-    },
-    #[serde(rename = "error")]
-    Err { message: String },
-}
-
 // ───────────────────────────────────────────────────────────────────────────
 // PLX-116 / T1 — unary terminals.
 //
@@ -354,6 +341,19 @@ pub enum CreateResult {
 // and the success shape needs no discriminant. Field names are preserved
 // verbatim from the old `Ok` variants.
 // ───────────────────────────────────────────────────────────────────────────
+
+/// Terminal of `create` — the new session and the head it starts at.
+///
+/// PLX-133 item 1: this replaces `CreateResult { Ok, Err }`, the last
+/// hand-written two-variant enum in `ClaudeCode`. PLX-116 could not delete it
+/// because `orcha` matched on it in-process at eight sites in another agent's
+/// files; both lanes are now one tree, so it is closed here rather than
+/// becoming a permanent exception.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateOk {
+    pub id: ClaudeCodeId,
+    pub head: Position,
+}
 
 /// Terminal of `get` / `session.get` — a session's configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -499,6 +499,15 @@ pub enum ClaudeCodeError {
     /// impl below rather than through an orphan `impl From<String>`.
     #[error("session file error: {0}")]
     SessionFile(String),
+
+    /// The loopback MCP endpoint could not be reached during `create`.
+    ///
+    /// PLX-133 item 1: `executor::check_mcp_reachable` is stringly-typed at its
+    /// own boundary (`Result<(), String>`); this variant re-types that string so
+    /// it reaches `TurnError` through the single `From` impl below, exactly as
+    /// `SessionFile` does for the `sessions::*` helpers.
+    #[error("loopback MCP endpoint unreachable: {0}")]
+    McpUnreachable(String),
 }
 
 /// The **one** place `ClaudeCode` shapes a wire error (PLX-116).
@@ -527,6 +536,7 @@ impl From<ClaudeCodeError> for plexus_core::runtime::TurnError {
             ClaudeCodeError::Serialization(_) => "claudecode.serialization",
             ClaudeCodeError::Arbor(_) => "claudecode.arbor",
             ClaudeCodeError::SessionFile(_) => "claudecode.session_file",
+            ClaudeCodeError::McpUnreachable(_) => "claudecode.mcp_unreachable",
         };
         Self::new(code, e.to_string())
     }

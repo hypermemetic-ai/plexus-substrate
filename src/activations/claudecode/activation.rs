@@ -2,7 +2,7 @@ use super::{
     executor::{ClaudeCodeExecutor, LaunchConfig},
     sessions,
     storage::ClaudeCodeStorage,
-    types::{ResolveResult, NodeEvent, ClaudeCodeConfig, ChatEvent, MessageRole, Position, RawClaudeEvent, StreamEventInner, StreamDelta, StreamContentBlock, RawContentBlock, ChatUsage, Model, CreateResult, ClaudeCodeError, GetOk, ListOk, DeleteOk, ForkOk, ChatStartOk, StreamId, PollOk, ClaudeCodeId, StreamListOk, GetTreeOk, RenderOk, SessionsListOk, SessionsGetOk, SessionsImportOk, SessionsExportOk, SessionsDeleteOk, StreamStatus},
+    types::{ResolveResult, NodeEvent, ClaudeCodeConfig, ChatEvent, MessageRole, Position, RawClaudeEvent, StreamEventInner, StreamDelta, StreamContentBlock, RawContentBlock, ChatUsage, Model, CreateOk, ClaudeCodeError, GetOk, ListOk, DeleteOk, ForkOk, ChatStartOk, StreamId, PollOk, ClaudeCodeId, StreamListOk, GetTreeOk, RenderOk, SessionsListOk, SessionsGetOk, SessionsImportOk, SessionsExportOk, SessionsDeleteOk, StreamStatus},
 };
 use crate::activations::arbor::{NodeId, TreeId};
 use async_stream::stream;
@@ -565,13 +565,14 @@ resolve_handle)]
 impl ClaudeCode {
     /// Create a new Claude Code session
     ///
-    /// PLX-116 RESIDUAL — **not** converted to a unary `Result`. `create` is
-    /// called in-process by `orcha` at eight sites across
-    /// `orcha/{activation,orchestrator,graph_runner}.rs`, each of which pins the
-    /// returned stream and matches on `CreateResult::{Ok,Err}`. Converting it is
-    /// a semantic edit to another agent's files while W1 is migrating them
-    /// concurrently, so PLX-116 rules 3–5 say stop rather than reach. It is the
-    /// only `ClaudeCode` method still carrying a hand-written Ok/Err enum.
+    /// PLX-133 item 1 — converted. PLX-116 left this as the one `ClaudeCode`
+    /// method still carrying a hand-written `CreateResult { Ok, Err }`, because
+    /// `orcha` matched on it in-process at eight sites across
+    /// `orcha/{activation,orchestrator,graph_runner}.rs` and those were another
+    /// agent's files, being migrated concurrently. Both lanes are now one tree,
+    /// so the enum is gone: `create` yields exactly once, so it is a unary
+    /// `Result<CreateOk, ClaudeCodeError>` like every other terminal method here,
+    /// and the eight call sites `match … .await` instead of pinning a stream.
     #[plexus_macros::method(params(
         name = "Human-readable name for the session",
         working_dir = "Working directory for Claude Code",
@@ -588,48 +589,36 @@ impl ClaudeCode {
         system_prompt: Option<String>,
         loopback_enabled: Option<bool>,
         loopback_session_id: Option<String>,
-    ) -> impl Stream<Item = CreateResult> + Send + 'static {
+    ) -> Result<CreateOk, ClaudeCodeError> {
         let storage = self.storage.clone();
         let loopback = loopback_enabled.unwrap_or(false);
 
-        stream! {
-            // Resolve relative paths to absolute before storing
-            let working_dir = match std::fs::canonicalize(&working_dir) {
-                Ok(p) => p.to_string_lossy().into_owned(),
-                Err(e) => {
-                    yield CreateResult::Err {
-                        message: ClaudeCodeError::PathResolution {
-                            path: working_dir,
-                            source: e,
-                        }.to_string(),
-                    };
-                    return;
-                }
-            };
+        // Resolve relative paths to absolute before storing
+        let working_dir = std::fs::canonicalize(&working_dir)
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|e| ClaudeCodeError::PathResolution {
+                path: working_dir,
+                source: e,
+            })?;
 
-            // Fail fast: if loopback is requested, the MCP server must be reachable.
-            // Without it Claude cannot resolve the permission-prompt tool and will
-            // return empty output instead of an error.
-            if loopback {
-                if let Err(e) = super::executor::check_mcp_reachable().await {
-                    yield CreateResult::Err { message: e };
-                    return;
-                }
-            }
-
-            // claude_session_id is None initially; populated after first chat with real Claude UUID
-            match storage.session_create(name, working_dir, model, system_prompt, None, loopback, None, loopback_session_id, None).await {
-                Ok(config) => {
-                    yield CreateResult::Ok {
-                        id: config.id,
-                        head: config.head,
-                    };
-                }
-                Err(e) => {
-                    yield CreateResult::Err { message: e.to_string() };
-                }
-            }
+        // Fail fast: if loopback is requested, the MCP server must be reachable.
+        // Without it Claude cannot resolve the permission-prompt tool and will
+        // return empty output instead of an error.
+        if loopback {
+            super::executor::check_mcp_reachable()
+                .await
+                .map_err(ClaudeCodeError::McpUnreachable)?;
         }
+
+        // claude_session_id is None initially; populated after first chat with real Claude UUID
+        let config = storage
+            .session_create(name, working_dir, model, system_prompt, None, loopback, None, loopback_session_id, None)
+            .await?;
+
+        Ok(CreateOk {
+            id: config.id,
+            head: config.head,
+        })
     }
 
     /// Chat with a session, streaming tokens like Cone
