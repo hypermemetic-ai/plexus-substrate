@@ -1,3 +1,6 @@
+// PLX-140 (ACP·F) — claudecode as the reference ACP agent. See `acp`'s module
+// docs for exactly what criterion c3 does and does not close.
+pub mod acp;
 pub mod activations;
 pub mod builder;
 pub mod mcp_bridge;
@@ -30,6 +33,8 @@ pub use builder::{build_plexus_rpc_with_tenancy, compose_tenant_hub_confined, Te
 // PLX-151 (M4·H2) — the confinement and the admission that gates it.
 pub use activations::claudecode::Confinement;
 pub use tenancy::{AdmissionRefused, TenantAdmission};
+// PLX-140 (ACP·F) — the reference ACP agent and its projection.
+pub use acp::{ChatEventProjection, ClaudeCodeAcpAgent, ACP_NAMESPACE};
 pub use mcp_bridge::PlexusMcpBridge;
 pub use mcp_session::{SqliteSessionManager, SqliteSessionConfig};
 pub use types::{Envelope, Handle, Origin};
