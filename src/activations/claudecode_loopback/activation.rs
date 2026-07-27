@@ -68,10 +68,37 @@ impl ClaudeCodeLoopback {
     /// `--permission-prompt-tool` changes shape. That is the CLI's own
     /// protocol, not ours to alter here.
     ///
-    /// PLX-105 replaces this body wholesale with an awaited turn callback and
-    /// owns that decision. Note for it: **no test anywhere in plexus-transport
-    /// or plexus-substrate asserts `content[0].text`**, so this path is
-    /// currently unguarded in either shape.
+    /// # PLX-105 — measured, and it is worse than PLX-116 could see
+    ///
+    /// The path is no longer unguarded: `tests/plx105_permission_wire.rs` drives
+    /// this method through `Activation::call_arc` and the real gateway rule and
+    /// asserts the bytes. What it measures is that **the CLI contract is already
+    /// broken, and was broken by the turn switchover rather than by any change
+    /// to this file**.
+    ///
+    /// Since a `#[method]` returning `impl Stream` is dispatched through the
+    /// turn runtime, the projection emits the yielded payload as a `.update`
+    /// `Data` item *and the turn's terminal as a second `Data` item*. The MCP
+    /// gateway buffers both — it never reads `content_type` — and two
+    /// mixed-type items render as a pretty-printed JSON **array**. So
+    /// `content[0].text` is
+    /// `["{\"behavior\":\"allow\",…}", {"stop":{"kind":"complete"},"value":null}]`
+    /// where the CLI's `--permission-prompt-tool` contract requires the object
+    /// alone.
+    ///
+    /// Converting this method to a unary `Result` does **not** fix that: one
+    /// buffered item is the terminal object, so the text becomes
+    /// `{"stop":…,"value":…}` — a different wrong shape. Neither shape restores
+    /// the contract, because the payload is only recoverable if the gateway
+    /// learns to distinguish an update from a terminal, i.e. to read
+    /// `content_type`. **That is a gateway-wide protocol decision affecting
+    /// every MCP tool, not a loopback change**, and PLX-105 stopped rather than
+    /// make it unilaterally. See the PLX-105 report.
+    ///
+    /// The poll loop below is therefore left in place: replacing it with an
+    /// awaited turn callback is separately blocked (see the module README), and
+    /// removing it while the response shape is broken would change two things at
+    /// once.
     #[plexus_macros::method(params(
         tool_name = "Name of the tool being requested",
         tool_use_id = "Unique ID for this tool invocation",
