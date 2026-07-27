@@ -30,7 +30,7 @@ type CancelRegistry = Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::watch:
 #[derive(Clone)]
 pub struct Orcha<P: HubContext = NoParent> {
     storage: Arc<OrchaStorage>,
-    claudecode: Arc<ClaudeCode<P>>,
+    claudecode: Arc<ClaudeCode>,
     loopback: Arc<ClaudeCodeLoopback>,
     arbor_storage: Arc<crate::activations::arbor::ArborStorage>,
     graph_runtime: Arc<GraphRuntime>,
@@ -44,7 +44,7 @@ impl<P: HubContext> Orcha<P> {
     /// Create a new Orcha activation
     pub fn new(
         storage: Arc<OrchaStorage>,
-        claudecode: Arc<ClaudeCode<P>>,
+        claudecode: Arc<ClaudeCode>,
         loopback: Arc<ClaudeCodeLoopback>,
         arbor_storage: Arc<crate::activations::arbor::ArborStorage>,
         graph_runtime: Arc<GraphRuntime>,
@@ -2395,9 +2395,9 @@ async fn build_graph_from_definition(
 
 // ─── Build + run ─────────────────────────────────────────────────────────────
 
-fn build_and_run_graph_definition<P: HubContext + 'static>(
+fn build_and_run_graph_definition(
     graph_runtime: Arc<GraphRuntime>,
-    claudecode: Arc<ClaudeCode<P>>,
+    claudecode: Arc<ClaudeCode>,
     arbor_storage: Arc<crate::activations::arbor::ArborStorage>,
     loopback_storage: Arc<crate::activations::claudecode_loopback::LoopbackStorage>,
     cancel_registry: CancelRegistry,
@@ -2676,8 +2676,8 @@ async fn save_status_summary_to_arbor(
 }
 
 /// Generate summary for a single agent
-async fn generate_agent_summary<P: HubContext>(
-    claudecode: &ClaudeCode<P>,
+async fn generate_agent_summary(
+    claudecode: &ClaudeCode,
     arbor_storage: &crate::activations::arbor::ArborStorage,
     agent: AgentInfo,
 ) -> Result<AgentSummary, String> {
@@ -2750,8 +2750,8 @@ async fn generate_agent_summary<P: HubContext>(
 }
 
 /// Generate overall meta-summary combining all agent work
-async fn generate_overall_summary<P: HubContext>(
-    claudecode: &ClaudeCode<P>,
+async fn generate_overall_summary(
+    claudecode: &ClaudeCode,
     session_id: &SessionId,
     agent_summaries: &[AgentSummary],
 ) -> Option<String> {

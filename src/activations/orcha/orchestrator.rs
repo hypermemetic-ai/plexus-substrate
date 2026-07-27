@@ -4,7 +4,6 @@ use super::types::{RunTaskRequest, OrchaEvent, AgentMode, SessionState, Validati
 use crate::activations::arbor::ArborStorage;
 use crate::activations::claudecode::{ChatEvent, ClaudeCode, Model};
 use crate::activations::claudecode_loopback::ClaudeCodeLoopback;
-use crate::plexus::HubContext;
 use async_stream::stream;
 use futures::Stream;
 use futures::StreamExt;
@@ -21,10 +20,10 @@ use uuid::Uuid;
 /// 5. Runs tests and auto-retries on failure
 ///
 /// Returns a stream of `OrchaEvent` items showing progress
-pub(super) async fn run_orchestration_task<P: HubContext>(
+pub(super) async fn run_orchestration_task(
     storage: Arc<OrchaStorage>,
     arbor: Arc<ArborStorage>,
-    claudecode: Arc<ClaudeCode<P>>,
+    claudecode: Arc<ClaudeCode>,
     loopback: Arc<ClaudeCodeLoopback>,
     request: RunTaskRequest,
     session_id_override: Option<String>,
@@ -476,9 +475,9 @@ async fn run_validation_test(artifact: &ValidationArtifact) -> ValidationResult 
 /// 2. Spawns an ephemeral Claude session with orcha context
 /// 3. Asks Claude whether to approve/deny the tool use
 /// 4. Resolves the approval accordingly
-async fn handle_tool_approval<P: HubContext>(
+async fn handle_tool_approval(
     loopback: Arc<ClaudeCodeLoopback>,
-    claudecode: Arc<ClaudeCode<P>>,
+    claudecode: Arc<ClaudeCode>,
     orcha_session_id: String,
     cc_session_id: String,
     tool_name: String,
@@ -643,9 +642,9 @@ pub(super) enum AgentTaskResult {
 /// - Updates agent state (not session state)
 ///
 /// Returns success/failure result (does not stream events)
-pub(super) async fn run_agent_task<P: HubContext>(
+pub(super) async fn run_agent_task(
     storage: Arc<OrchaStorage>,
-    claudecode: Arc<ClaudeCode<P>>,
+    claudecode: Arc<ClaudeCode>,
     loopback: Arc<ClaudeCodeLoopback>,
     agent_info: AgentInfo,
     task: String,
@@ -819,9 +818,9 @@ pub(super) async fn run_agent_task<P: HubContext>(
 }
 
 /// Spawn a background task to run an agent
-pub(super) fn spawn_agent_task<P: HubContext + 'static>(
+pub(super) fn spawn_agent_task(
     storage: Arc<OrchaStorage>,
-    claudecode: Arc<ClaudeCode<P>>,
+    claudecode: Arc<ClaudeCode>,
     loopback: Arc<ClaudeCodeLoopback>,
     agent_info: AgentInfo,
     task: String,
@@ -925,9 +924,9 @@ pub(super) async fn check_session_completion(storage: &OrchaStorage, session_id:
 }
 
 /// Handle agent spawn request (when an agent wants to spawn a helper)
-async fn handle_agent_spawn_request<P: HubContext>(
+async fn handle_agent_spawn_request(
     storage: Arc<OrchaStorage>,
-    claudecode: Arc<ClaudeCode<P>>,
+    claudecode: Arc<ClaudeCode>,
     loopback: Arc<ClaudeCodeLoopback>,
     parent_agent: &AgentInfo,
     input: serde_json::Value,
