@@ -47,6 +47,29 @@ impl ClaudeCode {
         }
     }
 
+    /// PLX-151 — the same activation, launching inside `confinement`.
+    ///
+    /// Storage is shared with the host instance, deliberately and visibly:
+    /// this ticket delivers **execution** isolation. DATA isolation (one
+    /// storage path per tenant) is PLX-128/PLX-129 and is *not* delivered
+    /// here. Saying so is the point — PLX-130's ordering claim is that M4·E's
+    /// value is conditional on execution being confined first, which is the
+    /// order these tickets land in.
+    #[must_use]
+    pub fn confined_to(&self, confinement: super::Confinement) -> Self {
+        Self {
+            storage: Arc::clone(&self.storage),
+            executor: self.executor.confined_to(confinement),
+        }
+    }
+
+    /// The confinement this instance launches inside, if any. Exposed so a
+    /// composition can be asserted rather than assumed.
+    #[must_use]
+    pub const fn confinement(&self) -> Option<&super::Confinement> {
+        self.executor.confinement()
+    }
+
     /// Resolve a claudecode handle to its message content
     ///
     /// Called by the macro-generated `resolve_handle` method.

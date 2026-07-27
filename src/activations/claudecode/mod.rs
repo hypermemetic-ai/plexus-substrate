@@ -8,7 +8,9 @@ mod types;
 // #[plexus_macros::activation]. SessionActivation is re-exported for parity
 // with the cone precedent (see mod.rs for ConeActivation).
 pub use activation::{ClaudeCode, ClaudeCodeMethod, SessionActivation, SessionActivationMethod};
-pub use executor::{check_mcp_reachable, ClaudeCodeExecutor, LaunchConfig};
+// PLX-151: `Confinement` is the per-tenant sandbox the launcher runs the CLI
+// inside. Public because the composer in `builder.rs` builds one per tenant.
+pub use executor::{check_mcp_reachable, ClaudeCodeExecutor, Confinement, LaunchConfig};
 pub use storage::{ClaudeCodeStorage, ClaudeCodeStorageConfig};
 pub use sessions::{AssistantEvent, AssistantMessage, ContentBlock, SessionEvent, UserEvent, UserMessage};
 pub use types::{
