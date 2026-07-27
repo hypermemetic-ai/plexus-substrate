@@ -229,6 +229,25 @@ impl CelestialBodyActivation {
     /// The bodies below are never executed — `activation_ir!` reads signatures
     /// only and discards bodies. Dispatch stays on the hand-written
     /// `impl Activation` beneath.
+    ///
+    /// # PLX-148 — the body is load-bearing, and its absence was silent
+    ///
+    /// `info` was written **without** a body, as `async fn info(&self) -> …;`.
+    /// That is not an `ImplItem::Fn`: `syn` parses a bodyless signature inside
+    /// an `impl` block as `ImplItem::Verbatim`, and
+    /// `ActivationIrSpec::from_impl` skips every item that is not a `Fn` with
+    /// `continue` — so this activation's *only* method was dropped, without a
+    /// warning, and `celestial` built as a document with **zero methods**.
+    ///
+    /// Nothing caught it because nothing could: the document had no wire route.
+    /// It reached one only when `solar/body` became fetchable, and a fetchable
+    /// document that describes no methods is a worse answer than an honest
+    /// refusal. `a_celestial_body_declares_its_one_method` pins it.
+    ///
+    /// The defect that let it happen is in `plexus-macros` and is **not fixed
+    /// here** — `from_impl` should reject an `impl` item it cannot read rather
+    /// than silently omit it. That crate is outside this build's ownership; it
+    /// is reported as a residual instead of patched in passing.
     #[doc(hidden)]
     #[allow(non_snake_case)]
     pub(crate) fn __plexus_activation_ir(
@@ -240,7 +259,9 @@ impl CelestialBodyActivation {
             impl CelestialBodyActivation {
                 /// Get information about this celestial body.
                 #[method]
-                async fn info(&self) -> impl Stream<Item = SolarEvent> + Send + 'static;
+                async fn info(&self) -> impl Stream<Item = SolarEvent> + Send + 'static {
+                    unreachable!("activation_ir! reads signatures and discards bodies")
+                }
             }
         )
     }

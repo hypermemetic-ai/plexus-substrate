@@ -640,7 +640,13 @@ pub async fn build_plexus_rpc_with_admission(
         compose_tenant_hub(&activations, tenant_surface).connectome(),
     );
 
-    let hub = Arc::new(compose_host_hub(&activations).register(mount));
+    // PLX-148: the `tenants` template is a whole second document embedded
+    // inside this one, so its Dynamic edges are advertised at `tenants/…`
+    // paths. Declared here rather than in `compose_host_hub` because only
+    // after `.register(mount)` is there a `tenants` node to walk through.
+    let hub = Arc::new(crate::activations::connectome::declare_tenant_template_connectomes(
+        compose_host_hub(&activations).register(mount),
+    ));
 
     // Run changelog startup check
     let plexus_hash = hub.compute_hash();

@@ -1,0 +1,60 @@
+
+===== /tmp/plx148-root.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-health.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-registry.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-claudecode_session.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-cone_of.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-solar_body.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-tenants_health.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-tenants_registry.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-tenants_cone_of.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
+
+===== /tmp/plx148-tenants_solar_body.json =====
+decodeConnectome OK
+CONFORMANT
+isConformant: True
+verifyHashes: []
