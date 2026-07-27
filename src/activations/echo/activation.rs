@@ -78,10 +78,27 @@ impl Echo {
     }
 
     /// Ping — returns a Pong response
+    ///
+    /// PLX-110: the first unary method in substrate. It yields exactly one
+    /// value, so before this build it paid full stream ceremony —
+    /// `stream! { yield .. }`, an `impl Stream` return, and a turn projection of
+    /// one `.update` followed by an empty `.terminal` — to say one thing once.
+    /// As `-> Result<EchoEvent, TurnError>` it emits **no updates** and one
+    /// terminal carrying the `EchoEvent`, and its `MethodIr` is now observably a
+    /// terminal-without-updates (`is_streaming() == false`), which is the
+    /// property PLX-107 named as the precondition for the IR ever becoming
+    /// authoritative on transport routing.
+    ///
+    /// `E` is `TurnError` here because `ping` has no domain failure to model;
+    /// the general bound is `E: Into<TurnError>`, and a method with a real error
+    /// type supplies one `impl From<MyError> for TurnError` that chooses the
+    /// code, the message and the structured `details` payload.
+    ///
+    /// `MethodSchema.streaming` is untouched: it was never declared for `ping`
+    /// and it is still false, so plexus-transport keeps serving this method as
+    /// JSON exactly as before (PLX-107's contract).
     #[plexus_macros::method(description = "Ping — returns a Pong response")]
-    async fn ping(&self) -> impl Stream<Item = EchoEvent> + Send + 'static {
-        stream! {
-            yield EchoEvent::Pong;
-        }
+    async fn ping(&self) -> Result<EchoEvent, plexus_core::runtime::TurnError> {
+        Ok(EchoEvent::Pong)
     }
 }
