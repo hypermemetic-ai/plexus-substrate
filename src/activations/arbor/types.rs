@@ -610,7 +610,13 @@ pub enum ArborEvent {
 // ============================================================================
 
 /// Error types for Arbor operations
-#[derive(Debug, Clone, thiserror::Error)]
+///
+/// `Serialize` is derived (PLX-117) so `TurnError::structured` can carry the
+/// typed value in `details` rather than flattening it to a string — RFC 002
+/// §6.7 forbids the flattening, and `plexus-core`'s error envelope exists to
+/// delete exactly that.
+#[derive(Debug, Clone, thiserror::Error, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArborError {
     #[error("Tree not found: {tree_id}")]
     TreeNotFound { tree_id: String },
@@ -639,5 +645,27 @@ impl From<&str> for ArborError {
             operation: "unknown".to_string(),
             detail: message.to_string(),
         }
+    }
+}
+
+/// The ONE place Arbor's domain error becomes a wire error (PLX-110 / PLX-117).
+///
+/// `#[activation]` bounds a unary method's `E` on `Into<TurnError>`, and this is
+/// the whole of Arbor's shaping: a stable `code` per variant, the `Display`
+/// string as `message`, and the typed value itself in `details`. Concentrating
+/// it here is what makes PLX-114 (is the envelope's `code` a string or an
+/// integer?) a one-function change instead of an edit at every call site — do
+/// not construct `TurnError` inline anywhere in this activation.
+impl From<ArborError> for plexus_core::runtime::TurnError {
+    fn from(e: ArborError) -> Self {
+        let code = match &e {
+            ArborError::TreeNotFound { .. } => "arbor.tree_not_found",
+            ArborError::NodeNotFound { .. } => "arbor.node_not_found",
+            ArborError::StorageError { .. } => "arbor.storage_error",
+            ArborError::InvalidState { .. } => "arbor.invalid_state",
+            ArborError::InitError { .. } => "arbor.init_error",
+        };
+        let message = e.to_string();
+        Self::structured(code, message, &e)
     }
 }

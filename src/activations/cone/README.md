@@ -10,9 +10,9 @@ conversation tree. Chatting advances the head along the tree by writing a
 user message + an assistant response as two new external nodes whose
 `Handle`s point back at the Cone database row carrying the full text.
 
-Cone is generic over a parent `HubContext` (`NoParent` for tests, typically
-`Weak<DynamicHub>` in the substrate) so that resolving foreign handles
-during context assembly routes through the hub. Context assembly walks
+Cone is a handle-resolution *provider*: it carries the `resolve_handle` flag
+and `resolve_handle_impl`, and it never needed a parent to do it (PLX-117
+deleted the unused parent-injection ritual). Context assembly walks
 from the root of the tree to the current head, resolves every external
 handle to its owning activation's content, and hands the resulting
 `Vec<cllient::Message>` to the configured model via `cllient::ModelRegistry`.
@@ -81,9 +81,6 @@ content, model, name }`.
 - `Arc<ArborStorage>` — injected at construction; every chat writes
   external nodes to Arbor via direct (in-process) storage calls.
 - `cllient::ModelRegistry` — resolves `model_id` to a concrete LLM client.
-- Parent `HubContext` — injected via `inject_parent`, used during context
-  assembly to resolve foreign handles (e.g. messages owned by another
-  activation that show up in the tree).
 - `Mustache` — `Cone::register_default_templates(&mustache)` installs
   `chat.default`, `chat.markdown`, `chat.json`, `create.default`,
   `list.default`.

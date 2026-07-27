@@ -638,7 +638,7 @@ mod tests {
         let handle = ConeStorage::message_to_handle(&message, "any-name");
 
         // plugin_id should match Cone's PLUGIN_ID
-        assert_eq!(handle.plugin_id, Cone::<crate::plexus::NoParent>::PLUGIN_ID);
+        assert_eq!(handle.plugin_id, Cone::PLUGIN_ID);
         assert_eq!(handle.version, "1.0.0");
         assert_eq!(handle.method, "chat");
     }

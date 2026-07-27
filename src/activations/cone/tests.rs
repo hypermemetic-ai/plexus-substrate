@@ -43,17 +43,25 @@ fn test_registry_result_schema_has_all_fields() {
 fn test_method_specific_return_types() {
     let method_schemas = ConeMethod::method_schemas();
 
-    // create -> CreateResult (2 variants: Created, Error)
+    // PLX-117: `create` and `list` are unary now — they return
+    // `Result<_, ConeError>`, so the failure path is the turn's terminal
+    // (StopKind::Failed, a structured TurnError) rather than an `Error` variant
+    // smuggled through the success type. Each therefore has ONE variant, and the
+    // error shaping lives in the single `impl From<ConeError> for TurnError`.
+    // `chat` below still has 4 — it genuinely streams, so an error mid-stream
+    // has to be an event.
+
+    // create -> CreateResult (1 variant: Created)
     let create = method_schemas.iter().find(|m| m.name == "create").unwrap();
     let create_returns = serde_json::to_value(create.returns.as_ref().unwrap()).unwrap();
     let create_variants = create_returns.get("oneOf").and_then(|v| v.as_array()).unwrap();
-    assert_eq!(create_variants.len(), 2, "CreateResult should have 2 variants");
+    assert_eq!(create_variants.len(), 1, "CreateResult should have 1 variant");
 
-    // list -> ListResult (2 variants: List, Error)
+    // list -> ListResult (1 variant: List)
     let list = method_schemas.iter().find(|m| m.name == "list").unwrap();
     let list_returns = serde_json::to_value(list.returns.as_ref().unwrap()).unwrap();
     let list_variants = list_returns.get("oneOf").and_then(|v| v.as_array()).unwrap();
-    assert_eq!(list_variants.len(), 2, "ListResult should have 2 variants");
+    assert_eq!(list_variants.len(), 1, "ListResult should have 1 variant");
 
     // chat -> ChatEvent (4 variants: Start, Content, Complete, Error)
     let chat = method_schemas.iter().find(|m| m.name == "chat").unwrap();
@@ -76,7 +84,8 @@ fn test_streaming_flag() {
     let chat = method_schemas.iter().find(|m| m.name == "chat").unwrap();
     assert!(chat.streaming, "chat should be streaming");
 
-    // create is NOT streaming (returns impl Stream but only yields one item)
+    // create is NOT streaming (PLX-117: it is now spelled as what it is —
+    // a unary `Result`-returning method)
     let create = method_schemas.iter().find(|m| m.name == "create").unwrap();
     assert!(!create.streaming, "create should NOT be streaming");
 }
@@ -499,7 +508,7 @@ async fn of_gate_role_is_dynamic_child_with_cone_ids_list() {
     use crate::plexus::{Activation, MethodRole};
 
     let (_cone_storage, arbor, dir) = create_test_storage().await;
-    let cone = Cone::<crate::plexus::NoParent>::new(
+    let cone = Cone::new(
         ConeStorageConfig { db_path: dir.path().join("schema_cones.db") },
         arbor,
     ).await.unwrap();
@@ -528,7 +537,7 @@ async fn get_child_resolves_valid_cone_id() {
     use crate::plexus::ChildRouter;
 
     let (_cone_storage, arbor, dir) = create_test_storage().await;
-    let cone = Cone::<crate::plexus::NoParent>::new(
+    let cone = Cone::new(
         ConeStorageConfig { db_path: dir.path().join("resolve_cones.db") },
         arbor,
     ).await.unwrap();
@@ -555,7 +564,7 @@ async fn get_child_returns_none_for_unknown_id() {
     use crate::plexus::ChildRouter;
 
     let (_cone_storage, arbor, dir) = create_test_storage().await;
-    let cone = Cone::<crate::plexus::NoParent>::new(
+    let cone = Cone::new(
         ConeStorageConfig { db_path: dir.path().join("unknown_cones.db") },
         arbor,
     ).await.unwrap();
@@ -585,7 +594,7 @@ async fn cone_child_router_capabilities_include_list() {
     use crate::plexus::{Activation, MethodRole};
 
     let (_cone_storage, arbor, dir) = create_test_storage().await;
-    let cone = Cone::<crate::plexus::NoParent>::new(
+    let cone = Cone::new(
         ConeStorageConfig { db_path: dir.path().join("caps_cones.db") },
         arbor,
     ).await.unwrap();
@@ -618,7 +627,7 @@ async fn list_children_streams_known_cone_ids() {
     use futures::StreamExt;
 
     let (_cone_storage, arbor, dir) = create_test_storage().await;
-    let cone = Cone::<crate::plexus::NoParent>::new(
+    let cone = Cone::new(
         ConeStorageConfig { db_path: dir.path().join("list_cones.db") },
         arbor,
     ).await.unwrap();

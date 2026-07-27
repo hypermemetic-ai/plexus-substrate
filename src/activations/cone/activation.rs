@@ -1,36 +1,31 @@
 use super::methods::ConeIdentifier;
 use super::storage::{ConeStorage, ConeStorageConfig};
 use super::types::{
-    ChatEvent, ChatUsage, ConeId, CreateResult, DeleteResult, GetResult,
+    ChatEvent, ChatUsage, ConeError, ConeId, CreateResult, DeleteResult, GetResult,
     ListResult, MessageRole, RegistryResult, ResolveResult, SetHeadResult,
 };
 use crate::activations::arbor::{Node, NodeId, NodeType};
 use crate::activations::bash::Bash;
-use crate::plexus::{HubContext, NoParent};
 use async_stream::stream;
 use cllient::{Message, ModelRegistry};
 use futures::Stream;
-use std::marker::PhantomData;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// Cone activation - orchestrates LLM conversations with Arbor context
 ///
-/// Generic over `P: HubContext` to allow different parent contexts:
-/// - `Weak<DynamicHub>` when registered with a `DynamicHub`
-/// - Custom context types for sub-hubs
-/// - `NoParent` for standalone testing
+/// PLX-117: no longer generic over `P: HubContext`. Cone is a handle-resolution
+/// *provider*, never a consumer — `Cone::parent()` and `has_parent()` had zero
+/// callers anywhere in `src/` or `tests/` (PLX-106, re-verified by PLX-111), and
+/// `resolve_handle_impl` below touches nothing but its own storage.
 #[derive(Clone)]
-pub struct Cone<P: HubContext = NoParent> {
+pub struct Cone {
     storage: Arc<ConeStorage>,
     llm_registry: Arc<ModelRegistry>,
-    /// Hub reference for resolving foreign handles when walking arbor trees
-    hub: Arc<OnceLock<P>>,
-    _phantom: PhantomData<P>,
 }
 
-impl<P: HubContext> Cone<P> {
-    /// Create a new Cone with a specific parent context type
-    pub async fn with_context_type(
+impl Cone {
+    /// Create a new Cone
+    pub async fn new(
         config: ConeStorageConfig,
         arbor: Arc<crate::activations::arbor::ArborStorage>,
     ) -> Result<Self, String> {
@@ -44,31 +39,7 @@ impl<P: HubContext> Cone<P> {
         Ok(Self {
             storage: Arc::new(storage),
             llm_registry: Arc::new(llm_registry),
-            hub: Arc::new(OnceLock::new()),
-            _phantom: PhantomData,
         })
-    }
-
-    /// Inject parent context for resolving foreign handles
-    ///
-    /// Called during hub construction (e.g., via `Arc::new_cyclic` for `DynamicHub`).
-    /// This allows Cone to resolve handles from other activations when walking arbor trees.
-    pub fn inject_parent(&self, parent: P) {
-        if self.hub.set(parent).is_err() {
-            tracing::warn!("Cone: inject_parent called but parent was already set");
-        }
-    }
-
-    /// Check if parent context has been injected
-    pub fn has_parent(&self) -> bool {
-        self.hub.get().is_some()
-    }
-
-    /// Get a reference to the parent context
-    ///
-    /// Returns None if `inject_parent` hasn't been called yet.
-    pub fn parent(&self) -> Option<&P> {
-        self.hub.get()
     }
 
     /// Get access to the underlying storage
@@ -76,16 +47,6 @@ impl<P: HubContext> Cone<P> {
     /// Useful for testing and direct storage operations.
     pub const fn storage(&self) -> &Arc<ConeStorage> {
         &self.storage
-    }
-}
-
-/// Convenience constructor and utilities for Cone with `NoParent` (standalone/testing)
-impl Cone<NoParent> {
-    pub async fn new(
-        config: ConeStorageConfig,
-        arbor: Arc<crate::activations::arbor::ArborStorage>,
-    ) -> Result<Self, String> {
-        Self::with_context_type(config, arbor).await
     }
 
     /// Register default templates with the mustache plugin
@@ -113,7 +74,7 @@ impl Cone<NoParent> {
     }
 }
 
-impl<P: HubContext> Cone<P> {
+impl Cone {
     /// Resolve a cone handle to its message content
     ///
     /// Called by the macro-generated `resolve_handle` method.
@@ -166,7 +127,7 @@ impl<P: HubContext> Cone<P> {
 version = "1.0.0",
 description = "LLM cone with persistent conversation context",
 resolve_handle)]
-impl<P: HubContext> Cone<P> {
+impl Cone {
     /// Create a new cone (LLM agent with persistent conversation context)
     #[plexus_macros::method(params(
         name = "Human-readable name for the cone",
@@ -180,31 +141,22 @@ impl<P: HubContext> Cone<P> {
         model_id: String,
         system_prompt: Option<String>,
         metadata: Option<serde_json::Value>,
-    ) -> impl Stream<Item = CreateResult> + Send + 'static {
-        let storage = self.storage.clone();
-        let llm_registry = self.llm_registry.clone();
-
-        stream! {
-            // Validate model exists before creating cone
-            if let Err(e) = llm_registry.from_id(&model_id) {
-                yield CreateResult::Error {
-                    message: format!("Invalid model_id '{model_id}': {e}")
-                };
-                return;
-            }
-
-            match storage.cone_create(name, model_id, system_prompt, metadata).await {
-                Ok(cone) => {
-                    yield CreateResult::Created {
-                        cone_id: cone.id,
-                        head: cone.head,
-                    };
-                }
-                Err(e) => {
-                    yield CreateResult::Error { message: e.to_string() };
-                }
-            }
+    ) -> Result<CreateResult, ConeError> {
+        // Validate model exists before creating cone
+        if let Err(e) = self.llm_registry.from_id(&model_id) {
+            return Err(ConeError::InvalidState {
+                message: format!("Invalid model_id '{model_id}': {e}"),
+            });
         }
+
+        let cone = self
+            .storage
+            .cone_create(name, model_id, system_prompt, metadata)
+            .await?;
+        Ok(CreateResult::Created {
+            cone_id: cone.id,
+            head: cone.head,
+        })
     }
 
     /// Get cone configuration by name or ID
@@ -212,45 +164,17 @@ impl<P: HubContext> Cone<P> {
     async fn get(
         &self,
         identifier: ConeIdentifier,
-    ) -> impl Stream<Item = GetResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            // Resolve identifier to ConeId
-            let cone_id = match storage.resolve_cone_identifier(&identifier).await {
-                Ok(id) => id,
-                Err(e) => {
-                    yield GetResult::Error { message: e.to_string() };
-                    return;
-                }
-            };
-
-            match storage.cone_get(&cone_id).await {
-                Ok(cone) => {
-                    yield GetResult::Data { cone };
-                }
-                Err(e) => {
-                    yield GetResult::Error { message: e.to_string() };
-                }
-            }
-        }
+    ) -> Result<GetResult, ConeError> {
+        let cone_id = self.storage.resolve_cone_identifier(&identifier).await?;
+        let cone = self.storage.cone_get(&cone_id).await?;
+        Ok(GetResult::Data { cone })
     }
 
     /// List all cones
     #[plexus_macros::method]
-    async fn list(&self) -> impl Stream<Item = ListResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.cone_list().await {
-                Ok(cones) => {
-                    yield ListResult::List { cones };
-                }
-                Err(e) => {
-                    yield ListResult::Error { message: e.to_string() };
-                }
-            }
-        }
+    async fn list(&self) -> Result<ListResult, ConeError> {
+        let cones = self.storage.cone_list().await?;
+        Ok(ListResult::List { cones })
     }
 
     /// Delete a cone (associated tree is preserved)
@@ -258,28 +182,10 @@ impl<P: HubContext> Cone<P> {
     async fn delete(
         &self,
         identifier: ConeIdentifier,
-    ) -> impl Stream<Item = DeleteResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            // Resolve identifier to ConeId
-            let cone_id = match storage.resolve_cone_identifier(&identifier).await {
-                Ok(id) => id,
-                Err(e) => {
-                    yield DeleteResult::Error { message: e.to_string() };
-                    return;
-                }
-            };
-
-            match storage.cone_delete(&cone_id).await {
-                Ok(()) => {
-                    yield DeleteResult::Deleted { cone_id };
-                }
-                Err(e) => {
-                    yield DeleteResult::Error { message: e.to_string() };
-                }
-            }
-        }
+    ) -> Result<DeleteResult, ConeError> {
+        let cone_id = self.storage.resolve_cone_identifier(&identifier).await?;
+        self.storage.cone_delete(&cone_id).await?;
+        Ok(DeleteResult::Deleted { cone_id })
     }
 
     /// Chat with a cone - appends prompt to context, calls LLM, advances head
@@ -568,55 +474,27 @@ impl<P: HubContext> Cone<P> {
         &self,
         identifier: ConeIdentifier,
         node_id: NodeId,
-    ) -> impl Stream<Item = SetHeadResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<SetHeadResult, ConeError> {
+        let cone_id = self.storage.resolve_cone_identifier(&identifier).await?;
 
-        stream! {
-            // Resolve identifier to ConeId
-            let cone_id = match storage.resolve_cone_identifier(&identifier).await {
-                Ok(id) => id,
-                Err(e) => {
-                    yield SetHeadResult::Error { message: e.to_string() };
-                    return;
-                }
-            };
+        // Get current head first
+        let old_head = self.storage.cone_get(&cone_id).await?.head;
 
-            // Get current head first
-            let old_head = match storage.cone_get(&cone_id).await {
-                Ok(cone) => cone.head,
-                Err(e) => {
-                    yield SetHeadResult::Error { message: e.to_string() };
-                    return;
-                }
-            };
+        // Advance to new node in same tree
+        let new_head = old_head.advance(node_id);
 
-            // Advance to new node in same tree
-            let new_head = old_head.advance(node_id);
-
-            match storage.cone_update_head(&cone_id, node_id).await {
-                Ok(()) => {
-                    yield SetHeadResult::Updated {
-                        cone_id,
-                        old_head,
-                        new_head,
-                    };
-                }
-                Err(e) => {
-                    yield SetHeadResult::Error { message: e.to_string() };
-                }
-            }
-        }
+        self.storage.cone_update_head(&cone_id, node_id).await?;
+        Ok(SetHeadResult::Updated {
+            cone_id,
+            old_head,
+            new_head,
+        })
     }
 
     /// Get available LLM services and models
     #[plexus_macros::method]
-    async fn registry(&self) -> impl Stream<Item = RegistryResult> + Send + 'static {
-        let llm_registry = self.llm_registry.clone();
-
-        stream! {
-            let export = llm_registry.export();
-            yield RegistryResult::Registry(export);
-        }
+    async fn registry(&self) -> Result<RegistryResult, ConeError> {
+        Ok(RegistryResult::Registry(self.llm_registry.export()))
     }
 
     /// Look up a specific cone by identifier (name or UUID) and return it as a
@@ -725,38 +603,18 @@ impl ConeActivation {
 impl ConeActivation {
     /// Return this cone's configuration.
     #[plexus_macros::method]
-    async fn get(&self) -> impl Stream<Item = GetResult> + Send + 'static {
-        let storage = self.storage.clone();
-        let cone_id = self.cone_id;
-
-        stream! {
-            match storage.cone_get(&cone_id).await {
-                Ok(cone) => {
-                    yield GetResult::Data { cone };
-                }
-                Err(e) => {
-                    yield GetResult::Error { message: e.to_string() };
-                }
-            }
-        }
+    async fn get(&self) -> Result<GetResult, ConeError> {
+        let cone = self.storage.cone_get(&self.cone_id).await?;
+        Ok(GetResult::Data { cone })
     }
 
     /// Delete this cone. The associated conversation tree is preserved.
     #[plexus_macros::method]
-    async fn delete(&self) -> impl Stream<Item = DeleteResult> + Send + 'static {
-        let storage = self.storage.clone();
-        let cone_id = self.cone_id;
-
-        stream! {
-            match storage.cone_delete(&cone_id).await {
-                Ok(()) => {
-                    yield DeleteResult::Deleted { cone_id };
-                }
-                Err(e) => {
-                    yield DeleteResult::Error { message: e.to_string() };
-                }
-            }
-        }
+    async fn delete(&self) -> Result<DeleteResult, ConeError> {
+        self.storage.cone_delete(&self.cone_id).await?;
+        Ok(DeleteResult::Deleted {
+            cone_id: self.cone_id,
+        })
     }
 
     /// Move this cone's canonical head to a different node in its tree.
@@ -766,34 +624,17 @@ impl ConeActivation {
     async fn set_head(
         &self,
         node_id: NodeId,
-    ) -> impl Stream<Item = SetHeadResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<SetHeadResult, ConeError> {
         let cone_id = self.cone_id;
+        let old_head = self.storage.cone_get(&cone_id).await?.head;
+        let new_head = old_head.advance(node_id);
 
-        stream! {
-            let old_head = match storage.cone_get(&cone_id).await {
-                Ok(cone) => cone.head,
-                Err(e) => {
-                    yield SetHeadResult::Error { message: e.to_string() };
-                    return;
-                }
-            };
-
-            let new_head = old_head.advance(node_id);
-
-            match storage.cone_update_head(&cone_id, node_id).await {
-                Ok(()) => {
-                    yield SetHeadResult::Updated {
-                        cone_id,
-                        old_head,
-                        new_head,
-                    };
-                }
-                Err(e) => {
-                    yield SetHeadResult::Error { message: e.to_string() };
-                }
-            }
-        }
+        self.storage.cone_update_head(&cone_id, node_id).await?;
+        Ok(SetHeadResult::Updated {
+            cone_id,
+            old_head,
+            new_head,
+        })
     }
 
     /// Chat with this cone — appends prompt to context, calls LLM, advances head.
@@ -1079,8 +920,7 @@ async fn resolve_context_to_messages(
             }
             NodeType::External { handle } => {
                 // Resolve handle based on plugin_id
-                // Use Cone::<NoParent> to access the const (same for all P)
-                if handle.plugin_id == Cone::<NoParent>::PLUGIN_ID {
+                if handle.plugin_id == Cone::PLUGIN_ID {
                     // Resolve cone message handle - format: "msg-{uuid}:{role}:{name}"
                     let identifier = handle.meta.join(":");
                     let msg = storage
