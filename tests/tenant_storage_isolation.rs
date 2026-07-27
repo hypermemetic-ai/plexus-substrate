@@ -775,3 +775,114 @@ async fn collect(stream: plexus_core::plexus::PlexusStream) -> String {
     }
     out
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The same property, through the REAL mount
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The tests above compose a tenant hub the way the factory does. This one
+/// makes the factory do it — one process-wide hub, two callers, dispatch by
+/// `tenants.<id>.<activation>.<method>` — because "the composer would scope it
+/// correctly if it were called" and "the composer is what runs" are different
+/// claims and only the second one ships.
+#[tokio::test]
+async fn end_to_end_one_hub_two_tenants_and_the_write_does_not_cross() {
+    let scene = Scene::new().await;
+    let hub = {
+        let _guard = STORAGE_INIT.lock().await;
+        plexus_substrate::build_plexus_rpc_with_admission(
+            Some(Arc::clone(&scene.admission)),
+            None,
+        )
+        .await
+    };
+
+    let caller = |tenant: &str| {
+        plexus_core::plexus::AuthContext::new(
+            format!("user-of-{tenant}"),
+            "sess".to_owned(),
+            vec!["user".to_owned()],
+            json!({ "org_id": tenant }),
+        )
+    };
+    let a = caller("tenant-a");
+    let b = caller("tenant-b");
+
+    const NAME: &str = "end-to-end";
+    let wrote = collect(
+        hub.route(
+            "tenants.tenant-a.mustache.register_template",
+            json!({
+                "plugin_id": PLUGIN,
+                "method": NAME,
+                "name": "default",
+                "template": SECRET,
+            }),
+            Some(&a),
+        )
+        .await
+        .expect("A registers through its own mount"),
+    )
+    .await;
+    assert!(
+        !wrote.contains("\"kind\": String(\"failed\")"),
+        "the write failed, so nothing below means anything: {wrote}"
+    );
+
+    // Liveness: A reads it back through the mount.
+    let a_read = collect(
+        hub.route(
+            "tenants.tenant-a.mustache.get_template",
+            json!({ "plugin_id": PLUGIN, "method": NAME, "name": "default" }),
+            Some(&a),
+        )
+        .await
+        .expect("A reads through its own mount"),
+    )
+    .await;
+    assert!(a_read.contains(SECRET), "A cannot read its own write: {a_read}");
+
+    // B, correctly admitted to its OWN mount, asks the identical question.
+    let b_read = match hub
+        .route(
+            "tenants.tenant-b.mustache.get_template",
+            json!({ "plugin_id": PLUGIN, "method": NAME, "name": "default" }),
+            Some(&b),
+        )
+        .await
+    {
+        Ok(stream) => collect(stream).await,
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        !b_read.contains(SECRET),
+        "tenant B read tenant A's template through the mount: {b_read}"
+    );
+
+    // And it is on the filesystem: A's file has the bytes, B's does not.
+    let a_db = scene
+        .roots
+        .join("tenant-a/storage/activations/mustache/templates.db");
+    let b_db = scene
+        .roots
+        .join("tenant-b/storage/activations/mustache/templates.db");
+    assert!(
+        a_db.exists(),
+        "the mount did not put tenant A's mustache database where PLX-129 says: {}",
+        a_db.display()
+    );
+    assert!(b_db.exists(), "tenant B never got a database of its own");
+    assert!(file_contains(&a_db, SECRET));
+    assert!(
+        !file_contains(&b_db, SECRET),
+        "the secret bytes are in tenant B's file"
+    );
+
+    // The host's own storage is untouched by either tenant.
+    let host = StorageScope::host().db_path("mustache", "templates.db");
+    assert!(
+        !file_contains(&host, SECRET),
+        "a tenant's write landed in the HOST database at {}",
+        host.display()
+    );
+}
