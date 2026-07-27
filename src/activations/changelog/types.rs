@@ -118,7 +118,47 @@ impl ChangelogEntry {
     }
 }
 
+/// The single error type for the changelog activation.
+///
+/// PLX-118: changelog never had a per-method `Ok`/`Err` enum. Its failure
+/// channel was worse — `tracing::error!` plus an **empty** stream, so a caller
+/// saw a successful turn with no data and no way to tell a failure from a
+/// no-op. Every method now returns `Result<ChangelogEvent, ChangelogError>`, so
+/// a storage failure lands where PLX-110 put it: the terminal, with
+/// `StopKind::Failed` and a structured payload. Shaping happens only in the one
+/// `From` impl below.
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+pub enum ChangelogError {
+    /// A changelog storage operation failed.
+    #[error("{0}")]
+    Storage(String),
+
+    /// `queue_complete` was given an id no queue entry has.
+    #[error("Queue entry not found: {0}")]
+    QueueEntryNotFound(String),
+}
+
+impl From<String> for ChangelogError {
+    fn from(message: String) -> Self {
+        Self::Storage(message)
+    }
+}
+
+impl From<ChangelogError> for plexus_core::runtime::TurnError {
+    fn from(e: ChangelogError) -> Self {
+        let code = match e {
+            ChangelogError::Storage(_) => "changelog.storage_error",
+            ChangelogError::QueueEntryNotFound(_) => "changelog.queue_entry_not_found",
+        };
+        plexus_core::runtime::TurnError::structured(code, e.to_string(), &e)
+    }
+}
+
 /// Events emitted by changelog operations
+///
+/// PLX-118: this is a domain event type, not a result type — it never carried an
+/// error variant — so it survives verbatim as the terminal value of each unary
+/// method, exactly as `EchoEvent` did for `echo.ping` (PLX-110).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChangelogEvent {

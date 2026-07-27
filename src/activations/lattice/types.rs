@@ -1,3 +1,4 @@
+use plexus_core::runtime::TurnError;
 use plexus_core::types::Handle;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -274,72 +275,53 @@ pub struct LatticeEventEnvelope {
 
 // ─── Result Types ─────────────────────────────────────────────────────────────
 
+/// The success payload of `lattice.get`.
+///
+/// PLX-118: every lattice method except `execute` yields exactly once, so each
+/// is now a unary `Result<T, LatticeError>` (PLX-110). The ten per-method
+/// `Ok`/`Err` enums that existed *because the stream was the only channel an
+/// error could travel down* are gone: the `Ok` payload became the terminal type
+/// and the `Err { message }` variant collapsed into the single `LatticeError`
+/// below, shaped for the wire in exactly one `impl From<LatticeError> for
+/// TurnError`.
+///
+/// `GetGraphResult` survives as a **struct** because its success payload has
+/// two fields and needs a name; it is no longer a result type.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CreateResult {
-    Ok { graph_id: GraphId },
-    Err { message: String },
+pub struct GetGraphResult {
+    pub graph: LatticeGraph,
+    pub nodes: Vec<LatticeNode>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AddNodeResult {
-    Ok { node_id: NodeId },
-    Err { message: String },
+/// The single error type for the lattice activation.
+///
+/// `LatticeStorage` reports failures as `String`; `From<String>` lets every
+/// method use `?` directly on it. The one `From<LatticeError> for TurnError`
+/// below is the *only* place lattice shapes an error for the wire — PLX-114 can
+/// move `TurnError.code` from `String` to an integer by editing this one impl.
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+pub enum LatticeError {
+    /// A storage or topology operation failed.
+    #[error("{0}")]
+    Storage(String),
+
+    /// The named node is not part of the named graph.
+    #[error("Node {node_id} not found in graph {graph_id}")]
+    NodeNotInGraph { graph_id: GraphId, node_id: NodeId },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AddEdgeResult {
-    Ok,
-    Err { message: String },
+impl From<String> for LatticeError {
+    fn from(message: String) -> Self {
+        Self::Storage(message)
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum NodeUpdateResult {
-    Ok,
-    Err { message: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CancelResult {
-    Ok,
-    Err { message: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GetGraphResult {
-    Ok { graph: LatticeGraph, nodes: Vec<LatticeNode> },
-    Err { message: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ListGraphsResult {
-    Ok { graphs: Vec<LatticeGraph> },
-    Err { message: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GetNodeInputsResult {
-    Ok { inputs: Vec<Token> },
-    Err { message: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CreateChildGraphResult {
-    Ok { graph_id: GraphId },
-    Err { message: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GetChildGraphsResult {
-    Ok { graphs: Vec<LatticeGraph> },
-    Err { message: String },
+impl From<LatticeError> for TurnError {
+    fn from(e: LatticeError) -> Self {
+        let code = match e {
+            LatticeError::Storage(_) => "lattice.storage_error",
+            LatticeError::NodeNotInGraph { .. } => "lattice.node_not_in_graph",
+        };
+        TurnError::structured(code, e.to_string(), &e)
+    }
 }

@@ -1,5 +1,39 @@
+use plexus_core::runtime::TurnError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+/// The single error type for the chaos activation.
+///
+/// PLX-118: the three chaos methods that yield exactly once are now unary
+/// `Result`s (PLX-110), and their `Err { message }` variants collapsed into
+/// this type. All wire shaping happens in the one `From` impl below, so
+/// PLX-114's pending decision about `TurnError.code` is a one-line change here.
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+pub enum ChaosError {
+    /// A lattice storage operation failed.
+    #[error("{0}")]
+    Storage(String),
+
+    /// `libc::kill` returned a non-zero status that is not ESRCH.
+    #[error("kill failed: {0}")]
+    KillFailed(String),
+}
+
+impl From<String> for ChaosError {
+    fn from(message: String) -> Self {
+        Self::Storage(message)
+    }
+}
+
+impl From<ChaosError> for TurnError {
+    fn from(e: ChaosError) -> Self {
+        let code = match e {
+            ChaosError::Storage(_) => "chaos.storage_error",
+            ChaosError::KillFailed(_) => "chaos.kill_failed",
+        };
+        TurnError::structured(code, e.to_string(), &e)
+    }
+}
 
 /// A running node found across all active graphs
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -20,6 +54,11 @@ pub enum ListRunningResult {
     Err { message: String },
 }
 
+/// The outcome of an injection.
+///
+/// PLX-118: no longer a result type — the failure variant became `ChaosError`.
+/// `Skipped` stays because "the node was not Running" is a legitimate
+/// non-failure outcome, not an error.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InjectResult {
@@ -27,8 +66,6 @@ pub enum InjectResult {
     Ok { graph_id: String, node_id: String, action: String },
     #[serde(rename = "skipped")]
     Skipped { reason: String },
-    #[serde(rename = "error")]
-    Err { message: String },
 }
 
 /// A process found on the system
@@ -56,8 +93,6 @@ pub enum KillProcessResult {
     Killed { pid: u32 },
     #[serde(rename = "not_found")]
     NotFound,
-    #[serde(rename = "error")]
-    Err { message: String },
 }
 
 /// Per-node status snapshot
