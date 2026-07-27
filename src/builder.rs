@@ -161,7 +161,7 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
         #[cfg(feature = "chaos")]
         let hub = hub.register(Chaos::new(lattice.storage()));
 
-        hub.register(arbor)
+        let hub = hub.register(arbor)
             .register(cone)
             .register(claudecode)
             .register(mustache)
@@ -172,7 +172,12 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
             .register(registry)
             .register(lattice)
             .register(Interactive::new())  // Bidirectional demo activation
-            .register(Solar::new())
+            .register(Solar::new());
+
+        // PLX-142: hand the hub each activation's macro-built ActivationIr, so
+        // `substrate.connectome` serves the real tree rather than a document
+        // lifted from the legacy schema. Must run after every `register`.
+        crate::activations::connectome::declare_connectomes(hub)
     });
 
     // Run changelog startup check

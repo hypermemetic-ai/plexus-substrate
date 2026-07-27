@@ -45,3 +45,7 @@ pub mod lattice;
 
 // Changelog tracks plexus hash transitions and planned changes
 pub mod changelog;
+
+// PLX-142: hands each activation's macro-built ActivationIr to the hub, so
+// `substrate.connectome` can serve a CONNECTOME RFC 002 document
+pub mod connectome;
