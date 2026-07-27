@@ -1,5 +1,5 @@
 use super::storage::{LoopbackStorage, LoopbackStorageConfig};
-use super::types::{ApprovalStatus, ApprovalId, RespondResult, PendingResult, WaitForApprovalResult, ConfigureResult};
+use super::types::{ApprovalStatus, ApprovalId, LoopbackError, RespondOk, PendingOk, WaitOutcome, ConfigureOk};
 use async_stream::stream;
 use futures::Stream;
 use serde_json::{json, Value};
@@ -49,6 +49,29 @@ impl ClaudeCodeLoopback {
     /// Returns a JSON string (not object) because Claude Code expects the MCP response
     /// to have the permission JSON already stringified in content[0].text.
     /// See: <https://github.com/anthropics/claude-code/blob/main/docs/permission-prompt-tool.md>
+    ///
+    /// # PLX-116 RESIDUAL — deliberately NOT converted to a unary `Result`
+    ///
+    /// `permit` yields exactly once on every path, so by T1 it is a unary
+    /// method. It is left as `impl Stream` anyway, because converting it is a
+    /// change to the permission path and PLX-116 reserves those for PLX-105.
+    ///
+    /// The reason is measured, not cautious. A turn is projected onto the
+    /// legacy `PlexusStream` with **the terminal emitted as another `Data`
+    /// item** (`plexus-core/src/runtime/bridge.rs:333-381`), and the MCP
+    /// gateway builds `content[0].text` from a *count-dependent* rule over the
+    /// buffered items (`plexus-transport/src/mcp/bridge.rs:563-587`): exactly
+    /// one item is rendered as that item, more than one as a pretty-printed
+    /// array. Converting `permit` moves it from two items (the yielded string
+    /// plus an empty terminal) to one (a terminal object wrapping the string
+    /// under `value`), so the text the spawned Claude CLI reads back from its
+    /// `--permission-prompt-tool` changes shape. That is the CLI's own
+    /// protocol, not ours to alter here.
+    ///
+    /// PLX-105 replaces this body wholesale with an awaited turn callback and
+    /// owns that decision. Note for it: **no test anywhere in plexus-transport
+    /// or plexus-substrate asserts `content[0].text`**, so this path is
+    /// currently unguarded in either shape.
     #[plexus_macros::method(params(
         tool_name = "Name of the tool being requested",
         tool_use_id = "Unique ID for this tool invocation",
@@ -186,19 +209,13 @@ impl ClaudeCodeLoopback {
         approval_id: ApprovalId,
         approve: bool,
         message: Option<String>,
-    ) -> impl Stream<Item = RespondResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.resolve_approval(&approval_id, approve, message).await {
-                Ok(()) => {
-                    yield RespondResult::Ok { approval_id };
-                }
-                Err(e) => {
-                    yield RespondResult::Err { message: e.to_string() };
-                }
-            }
-        }
+    ) -> Result<RespondOk, LoopbackError> {
+        // NOTE for PLX-105: `approve == false` is a *decision*, not a failure —
+        // it resolves successfully here and the denial travels to the CLI as an
+        // `Ok`-valued `{"behavior":"deny"}` payload out of `permit`. The `Err`
+        // arm below is reserved for storage failures.
+        self.storage.resolve_approval(&approval_id, approve, message).await?;
+        Ok(RespondOk { approval_id })
     }
 
     /// List pending approval requests
@@ -208,19 +225,9 @@ impl ClaudeCodeLoopback {
     async fn pending(
         &self,
         session_id: Option<String>,
-    ) -> impl Stream<Item = PendingResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.list_pending(session_id.as_deref()).await {
-                Ok(approvals) => {
-                    yield PendingResult::Ok { approvals };
-                }
-                Err(e) => {
-                    yield PendingResult::Err { message: e.to_string() };
-                }
-            }
-        }
+    ) -> Result<PendingOk, LoopbackError> {
+        let approvals = self.storage.list_pending(session_id.as_deref()).await?;
+        Ok(PendingOk { approvals })
     }
 
     /// Wait for a new approval request to arrive for a session
@@ -238,87 +245,72 @@ impl ClaudeCodeLoopback {
         &self,
         session_id: String,
         timeout_secs: Option<u64>,
-    ) -> impl Stream<Item = WaitForApprovalResult> + Send + 'static {
+    ) -> Result<WaitOutcome, LoopbackError> {
         let storage = self.storage.clone();
         let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
 
-        stream! {
-            // Get or create notifier for this session
-            let notifier = storage.get_or_create_notifier(&session_id);
+        // Get or create notifier for this session
+        let notifier = storage.get_or_create_notifier(&session_id);
 
-            // Record start time for timeout
-            let start = std::time::Instant::now();
+        // Record start time for timeout
+        let start = std::time::Instant::now();
 
-            loop {
-                // First check if there are already pending approvals
-                match storage.list_pending(Some(&session_id)).await {
-                    Ok(approvals) if !approvals.is_empty() => {
-                        // Found pending approval(s), return immediately
-                        yield WaitForApprovalResult::Ok { approvals };
-                        return;
-                    }
-                    Err(e) => {
-                        yield WaitForApprovalResult::Err {
-                            message: format!("Failed to check pending approvals: {e}")
-                        };
-                        return;
-                    }
-                    _ => {
-                        // No pending approvals, continue to wait
-                    }
+        loop {
+            // First check if there are already pending approvals
+            let approvals = storage.list_pending(Some(&session_id)).await?;
+            if !approvals.is_empty() {
+                // Found pending approval(s), return immediately
+                return Ok(WaitOutcome::Ok { approvals });
+            }
+
+            // Check if we've exceeded timeout
+            if start.elapsed() >= timeout {
+                return Ok(WaitOutcome::Timeout {
+                    message: format!("No approval received within {} seconds", timeout.as_secs()),
+                });
+            }
+
+            // Wait for notification or timeout
+            // Use tokio::select! to race between notification and timeout
+            tokio::select! {
+                () = notifier.notified() => {
+                    // New approval arrived, loop will check pending again
                 }
-
-                // Check if we've exceeded timeout
-                if start.elapsed() >= timeout {
-                    yield WaitForApprovalResult::Timeout {
-                        message: format!("No approval received within {} seconds", timeout.as_secs())
-                    };
-                    return;
-                }
-
-                // Wait for notification or timeout
-                // Use tokio::select! to race between notification and timeout
-                tokio::select! {
-                    _ = notifier.notified() => {
-                        // New approval arrived, loop will check pending again
-                    }
-                    _ = sleep(timeout.saturating_sub(start.elapsed())) => {
-                        // Timeout reached
-                        yield WaitForApprovalResult::Timeout {
-                            message: format!("No approval received within {} seconds", timeout.as_secs())
-                        };
-                        return;
-                    }
+                () = sleep(timeout.saturating_sub(start.elapsed())) => {
+                    // Timeout reached
+                    return Ok(WaitOutcome::Timeout {
+                        message: format!("No approval received within {} seconds", timeout.as_secs()),
+                    });
                 }
             }
         }
     }
 
     /// Generate MCP configuration for a loopback session
+    ///
+    /// PLX-116: `ConfigureResult::Err` was never constructed — this method
+    /// cannot fail. `E` is `LoopbackError` for uniformity with the rest of the
+    /// activation; it is simply never produced.
     #[plexus_macros::method(params(
         session_id = "Session ID for correlation"
     ))]
     async fn configure(
         &self,
         session_id: String,
-    ) -> impl Stream<Item = ConfigureResult> + Send + 'static {
-        let mcp_url = self.mcp_url.clone();
-
-        stream! {
-            // Include session_id in env config for correlation
-            let config = json!({
-                "mcpServers": {
-                    "plexus": {
-                        "type": "http",
-                        "url": mcp_url
-                    }
-                },
-                "env": {
-                    "LOOPBACK_SESSION_ID": session_id
+    ) -> Result<ConfigureOk, LoopbackError> {
+        // Include session_id in env config for correlation
+        let config = json!({
+            "mcpServers": {
+                "plexus": {
+                    "type": "http",
+                    "url": self.mcp_url
                 }
-            });
+            },
+            "env": {
+                "LOOPBACK_SESSION_ID": session_id
+            }
+        });
 
-            yield ConfigureResult::Ok { mcp_config: config };
-        }
+        Ok(ConfigureOk { mcp_config: config })
     }
 }

@@ -32,10 +32,24 @@ per-session `tokio::sync::Notify`) so the approver does not have to poll.
 | Method | Params | Returns | Description |
 |---|---|---|---|
 | `permit` | `tool_name: String, tool_use_id: String, input: Value, _connection: Option<Value>` | `Stream<Item=String>` | Permission-prompt handler — blocks polling storage until the approval resolves. Returns a stringified JSON response per the MCP contract. |
-| `respond` | `approval_id: ApprovalId, approve: bool, message: Option<String>` | `Stream<Item=RespondResult>` | Approve or deny a pending approval. |
-| `pending` | `session_id: Option<String>` | `Stream<Item=PendingResult>` | Snapshot of pending approvals, optionally filtered by session. |
-| `wait_for_approval` | `session_id: String, timeout_secs: Option<u64>` | `Stream<Item=WaitForApprovalResult>` | Block until a new approval arrives for the session, or timeout (default 300s). |
-| `configure` | `session_id: String` | `Stream<Item=ConfigureResult>` | Generate an MCP config block for a loopback session. |
+| `respond` | `approval_id: ApprovalId, approve: bool, message: Option<String>` | `Result<RespondOk, LoopbackError>` | Approve or deny a pending approval. |
+| `pending` | `session_id: Option<String>` | `Result<PendingOk, LoopbackError>` | Snapshot of pending approvals, optionally filtered by session. |
+| `wait_for_approval` | `session_id: String, timeout_secs: Option<u64>` | `Result<WaitOutcome, LoopbackError>` | Block until a new approval arrives for the session, or timeout (default 300s). A timeout is a `WaitOutcome::Timeout` **value**, not an error. |
+| `configure` | `session_id: String` | `Result<ConfigureOk, LoopbackError>` | Generate an MCP config block for a loopback session. |
+
+PLX-116 converted the four non-`permit` methods from `impl Stream` to unary
+`Result`s: the failure is now the turn's `TurnError` terminal (`StopKind::Failed`)
+rather than an `Err` variant of the streamed item, and every failure is shaped by
+the single `impl From<LoopbackError> for TurnError` in `types.rs`.
+
+`permit` was deliberately left as `impl Stream` — see the doc comment on the
+method. It is the CLI-facing half of the permission path and PLX-105 owns it.
+
+**A denial is still not an error.** `respond(approve = false)` succeeds, and the
+"no" reaches the CLI as an `Ok`-valued `{"behavior":"deny"}` payload out of
+`permit`. RFC 002 §6.6's `StopKind::Refused` — the spelling a denial should get
+once the loopback resolves through the turn callback — does not exist yet
+(PLX-112); `Err` is currently *defined* as `Failed`.
 
 ## Storage
 
@@ -73,5 +87,5 @@ synapse --port 44104 lforge substrate loopback.respond \
 
 - `activation.rs` — RPC method surface + blocking-poll permit loop
 - `storage.rs` — SQLite + in-memory notifier map + `LoopbackStorageConfig`
-- `types.rs` — `ApprovalStatus`, `ApprovalId`, result enums
+- `types.rs` — `ApprovalStatus`, `ApprovalId`, unary terminal types, and the one `From<LoopbackError> for TurnError`
 - `mod.rs` — module exports

@@ -2,71 +2,49 @@ use super::{
     executor::{ClaudeCodeExecutor, LaunchConfig},
     sessions,
     storage::ClaudeCodeStorage,
-    types::{ResolveResult, NodeEvent, ClaudeCodeConfig, ChatEvent, MessageRole, Position, RawClaudeEvent, StreamEventInner, StreamDelta, StreamContentBlock, RawContentBlock, ChatUsage, Model, CreateResult, ClaudeCodeError, GetResult, ListResult, DeleteResult, ForkResult, ChatStartResult, StreamId, PollResult, ClaudeCodeId, StreamListResult, GetTreeResult, RenderResult, SessionsListResult, SessionsGetResult, SessionsImportResult, SessionsExportResult, SessionsDeleteResult, StreamStatus},
+    types::{ResolveResult, NodeEvent, ClaudeCodeConfig, ChatEvent, MessageRole, Position, RawClaudeEvent, StreamEventInner, StreamDelta, StreamContentBlock, RawContentBlock, ChatUsage, Model, CreateResult, ClaudeCodeError, GetOk, ListOk, DeleteOk, ForkOk, ChatStartOk, StreamId, PollOk, ClaudeCodeId, StreamListOk, GetTreeOk, RenderOk, SessionsListOk, SessionsGetOk, SessionsImportOk, SessionsExportOk, SessionsDeleteOk, StreamStatus},
 };
 use crate::activations::arbor::{NodeId, TreeId};
-use crate::plexus::{HubContext, NoParent};
 use async_stream::stream;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
-use std::marker::PhantomData;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tracing::Instrument;
 
 /// `ClaudeCode` activation - manages Claude Code sessions with Arbor-backed history
 ///
-/// Generic over `P: HubContext` to allow different parent contexts:
-/// - `Weak<DynamicHub>` when registered with a `DynamicHub`
-/// - Custom context types for sub-hubs
-/// - `NoParent` for standalone testing
+/// PLX-116 / T2: the `P: HubContext` parent-injection ritual is gone. The
+/// `hub: Arc<OnceLock<P>>` field, `_phantom`, `inject_parent`, `has_parent` and
+/// `parent` existed so an activation could dispatch *upward* through the hub.
+/// PLX-109 §4 measured that `ClaudeCode::parent()` had **zero callers** in
+/// `src/` or `tests/` — the handle was never read here. `resolve_handle` /
+/// `resolve_handle_impl` below are deliberately KEPT: `ClaudeCode` is a handle
+/// *provider*, which is a downward-facing capability that never needed a parent.
 #[derive(Clone)]
-pub struct ClaudeCode<P: HubContext = NoParent> {
+pub struct ClaudeCode {
     pub storage: Arc<ClaudeCodeStorage>,
     executor: ClaudeCodeExecutor,
-    /// Hub reference for resolving foreign handles when walking arbor trees
-    hub: Arc<OnceLock<P>>,
-    _phantom: PhantomData<P>,
 }
 
-impl<P: HubContext> ClaudeCode<P> {
-    /// Create a new `ClaudeCode` with a specific parent context type
+impl ClaudeCode {
+    /// Create a new `ClaudeCode`
+    ///
+    /// Retains its pre-PLX-116 name (`with_context_type`) because `builder.rs`
+    /// and downstream call sites use it; there is no longer a context type to
+    /// choose.
     pub fn with_context_type(storage: Arc<ClaudeCodeStorage>) -> Self {
         Self {
             storage,
             executor: ClaudeCodeExecutor::new(),
-            hub: Arc::new(OnceLock::new()),
-            _phantom: PhantomData,
         }
     }
 
-    /// Create with custom executor and parent context type
-    pub fn with_executor_and_context(storage: Arc<ClaudeCodeStorage>, executor: ClaudeCodeExecutor) -> Self {
+    /// Create with a custom executor
+    pub const fn with_executor_and_context(storage: Arc<ClaudeCodeStorage>, executor: ClaudeCodeExecutor) -> Self {
         Self {
             storage,
             executor,
-            hub: Arc::new(OnceLock::new()),
-            _phantom: PhantomData,
         }
-    }
-
-    /// Inject parent context for resolving foreign handles
-    ///
-    /// Called during hub construction (e.g., via `Arc::new_cyclic` for `DynamicHub`).
-    /// This allows `ClaudeCode` to resolve handles from other activations when walking arbor trees.
-    pub fn inject_parent(&self, parent: P) {
-        let _ = self.hub.set(parent);
-    }
-
-    /// Check if parent context has been injected
-    pub fn has_parent(&self) -> bool {
-        self.hub.get().is_some()
-    }
-
-    /// Get a reference to the parent context
-    ///
-    /// Returns None if `inject_parent` hasn't been called yet.
-    pub fn parent(&self) -> Option<&P> {
-        self.hub.get()
     }
 
     /// Resolve a claudecode handle to its message content
@@ -117,13 +95,13 @@ impl<P: HubContext> ClaudeCode<P> {
     }
 }
 
-/// Convenience constructors for `ClaudeCode` with `NoParent` (standalone/testing)
-impl ClaudeCode<NoParent> {
+/// Convenience constructors (standalone/testing)
+impl ClaudeCode {
     pub fn new(storage: Arc<ClaudeCodeStorage>) -> Self {
         Self::with_context_type(storage)
     }
 
-    pub fn with_executor(storage: Arc<ClaudeCodeStorage>, executor: ClaudeCodeExecutor) -> Self {
+    pub const fn with_executor(storage: Arc<ClaudeCodeStorage>, executor: ClaudeCodeExecutor) -> Self {
         Self::with_executor_and_context(storage, executor)
     }
 }
@@ -584,8 +562,16 @@ fn chat_stream_for_config(
 version = "1.0.0",
 description = "Manage Claude Code sessions with Arbor-backed conversation history",
 resolve_handle)]
-impl<P: HubContext> ClaudeCode<P> {
+impl ClaudeCode {
     /// Create a new Claude Code session
+    ///
+    /// PLX-116 RESIDUAL — **not** converted to a unary `Result`. `create` is
+    /// called in-process by `orcha` at eight sites across
+    /// `orcha/{activation,orchestrator,graph_runner}.rs`, each of which pins the
+    /// returned stream and matches on `CreateResult::{Ok,Err}`. Converting it is
+    /// a semantic edit to another agent's files while W1 is migrating them
+    /// concurrently, so PLX-116 rules 3–5 say stop rather than reach. It is the
+    /// only `ClaudeCode` method still carrying a hand-written Ok/Err enum.
     #[plexus_macros::method(params(
         name = "Human-readable name for the session",
         working_dir = "Working directory for Claude Code",
@@ -693,62 +679,24 @@ impl<P: HubContext> ClaudeCode<P> {
 
     /// Get session configuration details
     #[plexus_macros::method]
-    async fn get(&self, name: String) -> impl Stream<Item = GetResult> + Send + 'static {
-        let result = self.storage.session_get_by_name(&name).await;
-
-        stream! {
-            match result {
-                Ok(config) => {
-                    yield GetResult::Ok { config };
-                }
-                Err(e) => {
-                    yield GetResult::Err { message: e.to_string() };
-                }
-            }
-        }
+    async fn get(&self, name: String) -> Result<GetOk, ClaudeCodeError> {
+        let config = self.storage.session_get_by_name(&name).await?;
+        Ok(GetOk { config })
     }
 
     /// List all Claude Code sessions
     #[plexus_macros::method]
-    async fn list(&self) -> impl Stream<Item = ListResult> + Send + 'static {
-        let storage = self.storage.clone();
-
-        stream! {
-            match storage.session_list().await {
-                Ok(sessions) => {
-                    yield ListResult::Ok { sessions };
-                }
-                Err(e) => {
-                    yield ListResult::Err { message: e.to_string() };
-                }
-            }
-        }
+    async fn list(&self) -> Result<ListOk, ClaudeCodeError> {
+        let sessions = self.storage.session_list().await?;
+        Ok(ListOk { sessions })
     }
 
     /// Delete a session
     #[plexus_macros::method]
-    async fn delete(&self, name: String) -> impl Stream<Item = DeleteResult> + Send + 'static {
-        let storage = self.storage.clone();
-        let resolve_result = storage.session_get_by_name(&name).await;
-
-        stream! {
-            let config = match resolve_result {
-                Ok(c) => c,
-                Err(e) => {
-                    yield DeleteResult::Err { message: e.to_string() };
-                    return;
-                }
-            };
-
-            match storage.session_delete(&config.id).await {
-                Ok(_) => {
-                    yield DeleteResult::Ok { id: config.id };
-                }
-                Err(e) => {
-                    yield DeleteResult::Err { message: e.to_string() };
-                }
-            }
-        }
+    async fn delete(&self, name: String) -> Result<DeleteOk, ClaudeCodeError> {
+        let config = self.storage.session_get_by_name(&name).await?;
+        self.storage.session_delete(&config.id).await?;
+        Ok(DeleteOk { id: config.id })
     }
 
     /// Fork a session to create a branch point
@@ -757,54 +705,35 @@ impl<P: HubContext> ClaudeCode<P> {
         &self,
         name: String,
         new_name: String,
-    ) -> impl Stream<Item = ForkResult> + Send + 'static {
+    ) -> Result<ForkOk, ClaudeCodeError> {
         let storage = self.storage.clone();
-        let resolve_result = storage.session_get_by_name(&name).await;
 
-        stream! {
-            // Get parent session
-            let parent = match resolve_result {
-                Ok(c) => c,
-                Err(e) => {
-                    yield ForkResult::Err { message: e.to_string() };
-                    return;
-                }
-            };
+        // Get parent session
+        let parent = storage.session_get_by_name(&name).await?;
 
-            // Create new session starting at parent's head position
-            // The new session will fork Claude's session on first chat
-            let new_config = match storage.session_create(
-                new_name,
-                parent.working_dir.clone(),
-                parent.model,
-                parent.system_prompt.clone(),
-                parent.mcp_config.clone(),
-                parent.loopback_enabled,
-                None, // claude_session_id - will be set on first chat with fork_session=true
-                None, // loopback_session_id
-                None, // metadata
-            ).await {
-                Ok(mut c) => {
-                    // Update head to parent's position (share the same tree point)
-                    // This creates a branch - the new session diverges from here
-                    if let Err(e) = storage.session_update_head(&c.id, parent.head.node_id, None).await {
-                        yield ForkResult::Err { message: e.to_string() };
-                        return;
-                    }
-                    c.head = parent.head;
-                    c
-                }
-                Err(e) => {
-                    yield ForkResult::Err { message: e.to_string() };
-                    return;
-                }
-            };
+        // Create new session starting at parent's head position
+        // The new session will fork Claude's session on first chat
+        let mut new_config = storage.session_create(
+            new_name,
+            parent.working_dir.clone(),
+            parent.model,
+            parent.system_prompt.clone(),
+            parent.mcp_config.clone(),
+            parent.loopback_enabled,
+            None, // claude_session_id - will be set on first chat with fork_session=true
+            None, // loopback_session_id
+            None, // metadata
+        ).await?;
 
-            yield ForkResult::Ok {
-                id: new_config.id,
-                head: new_config.head,
-            };
-        }
+        // Update head to parent's position (share the same tree point)
+        // This creates a branch - the new session diverges from here
+        storage.session_update_head(&new_config.id, parent.head.node_id, None).await?;
+        new_config.head = parent.head;
+
+        Ok(ForkOk {
+            id: new_config.id,
+            head: new_config.head,
+        })
     }
 
     /// Start an async chat - returns immediately with `stream_id` for polling
@@ -821,60 +750,41 @@ impl<P: HubContext> ClaudeCode<P> {
         name: String,
         prompt: String,
         ephemeral: Option<bool>,
-    ) -> impl Stream<Item = ChatStartResult> + Send + 'static {
+    ) -> Result<ChatStartOk, ClaudeCodeError> {
         let storage = self.storage.clone();
         let executor = self.executor.clone();
+        let is_ephemeral = ephemeral.unwrap_or(false);
 
-        // Resolve session before entering stream
-        let resolve_result = storage.session_get_by_name(&name).await;
+        // 1. Resolve session
+        let config = storage.session_get_by_name(&name).await?;
+        let session_id = config.id;
 
-        stream! {
-            let is_ephemeral = ephemeral.unwrap_or(false);
+        // 2. Create stream buffer
+        let stream_id = storage.stream_create(session_id).await?;
 
-            // 1. Resolve session
-            let config = match resolve_result {
-                Ok(c) => c,
-                Err(e) => {
-                    yield ChatStartResult::Err { message: e.to_string() };
-                    return;
-                }
-            };
+        // 3. Spawn background task to run the chat
+        let storage_bg = storage.clone();
+        let executor_bg = executor.clone();
+        let prompt_bg = prompt.clone();
+        let config_bg = config.clone();
+        let stream_id_bg = stream_id;
 
-            let session_id = config.id;
+        tokio::spawn(async move {
+            Self::run_chat_background(
+                storage_bg,
+                executor_bg,
+                config_bg,
+                prompt_bg,
+                is_ephemeral,
+                stream_id_bg,
+            ).await;
+        }.instrument(tracing::info_span!("chat_async_bg", stream_id = %stream_id)));
 
-            // 2. Create stream buffer
-            let stream_id = match storage.stream_create(session_id).await {
-                Ok(id) => id,
-                Err(e) => {
-                    yield ChatStartResult::Err { message: e.to_string() };
-                    return;
-                }
-            };
-
-            // 3. Spawn background task to run the chat
-            let storage_bg = storage.clone();
-            let executor_bg = executor.clone();
-            let prompt_bg = prompt.clone();
-            let config_bg = config.clone();
-            let stream_id_bg = stream_id;
-
-            tokio::spawn(async move {
-                Self::run_chat_background(
-                    storage_bg,
-                    executor_bg,
-                    config_bg,
-                    prompt_bg,
-                    is_ephemeral,
-                    stream_id_bg,
-                ).await;
-            }.instrument(tracing::info_span!("chat_async_bg", stream_id = %stream_id)));
-
-            // 4. Return immediately with stream_id
-            yield ChatStartResult::Ok {
-                stream_id,
-                session_id,
-            };
-        }
+        // 4. Return immediately with stream_id
+        Ok(ChatStartOk {
+            stream_id,
+            session_id,
+        })
     }
 
     /// Poll a stream for new events
@@ -891,51 +801,41 @@ impl<P: HubContext> ClaudeCode<P> {
         stream_id: StreamId,
         from_seq: Option<u64>,
         limit: Option<u64>,
-    ) -> impl Stream<Item = PollResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<PollOk, ClaudeCodeError> {
+        let limit_usize = limit.map(|l| l as usize);
 
-        stream! {
-            let limit_usize = limit.map(|l| l as usize);
-
-            match storage.stream_poll(&stream_id, from_seq, limit_usize).await {
-                Ok((info, events)) => {
-                    let has_more = info.read_position < info.event_count;
-                    yield PollResult::Ok {
-                        status: info.status,
-                        events,
-                        read_position: info.read_position,
-                        total_events: info.event_count,
-                        has_more,
-                    };
-                }
-                Err(e) => {
-                    yield PollResult::Err { message: e.to_string() };
-                }
-            }
-        }
+        let (info, events) = self.storage.stream_poll(&stream_id, from_seq, limit_usize).await?;
+        let has_more = info.read_position < info.event_count;
+        Ok(PollOk {
+            status: info.status,
+            events,
+            read_position: info.read_position,
+            total_events: info.event_count,
+            has_more,
+        })
     }
 
     /// List active streams
     ///
     /// Returns all active streams, optionally filtered by session.
+    ///
+    /// PLX-116: `StreamListResult` had an `Err` variant that was never
+    /// constructed — `stream_list*` is infallible. `E` is `ClaudeCodeError` for
+    /// uniformity with the rest of the activation; it is simply never produced.
     #[plexus_macros::method(params(
         session_id = "Optional: filter by session ID"
     ))]
     async fn streams(
         &self,
         session_id: Option<ClaudeCodeId>,
-    ) -> impl Stream<Item = StreamListResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<StreamListOk, ClaudeCodeError> {
+        let streams = if let Some(sid) = session_id {
+            self.storage.stream_list_for_session(&sid).await
+        } else {
+            self.storage.stream_list().await
+        };
 
-        stream! {
-            let streams = if let Some(sid) = session_id {
-                storage.stream_list_for_session(&sid).await
-            } else {
-                storage.stream_list().await
-            };
-
-            yield StreamListResult::Ok { streams };
-        }
+        Ok(StreamListOk { streams })
     }
 
     /// Get arbor tree information for a session
@@ -945,23 +845,13 @@ impl<P: HubContext> ClaudeCode<P> {
     async fn get_tree(
         &self,
         name: String,
-    ) -> impl Stream<Item = GetTreeResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<GetTreeOk, ClaudeCodeError> {
+        let config = self.storage.session_get_by_name(&name).await?;
 
-        stream! {
-            let config = match storage.session_get_by_name(&name).await {
-                Ok(c) => c,
-                Err(e) => {
-                    yield GetTreeResult::Err { message: e.to_string() };
-                    return;
-                }
-            };
-
-            yield GetTreeResult::Ok {
-                tree_id: config.head.tree_id,
-                head: config.head.node_id,
-            };
-        }
+        Ok(GetTreeOk {
+            tree_id: config.head.tree_id,
+            head: config.head.node_id,
+        })
     }
 
     /// Render arbor tree as Claude API messages
@@ -975,46 +865,34 @@ impl<P: HubContext> ClaudeCode<P> {
         name: String,
         start: Option<NodeId>,
         end: Option<NodeId>,
-    ) -> impl Stream<Item = RenderResult> + Send + 'static {
+    ) -> Result<RenderOk, ClaudeCodeError> {
         let storage = self.storage.clone();
 
-        stream! {
-            // Get session config
-            let config = match storage.session_get_by_name(&name).await {
-                Ok(c) => c,
-                Err(e) => {
-                    yield RenderResult::Err { message: e.to_string() };
-                    return;
-                }
-            };
+        // Get session config
+        let config = storage.session_get_by_name(&name).await?;
 
-            let tree_id = config.head.tree_id;
-            let end_node = end.unwrap_or(config.head.node_id);
+        let tree_id = config.head.tree_id;
+        let end_node = end.unwrap_or(config.head.node_id);
 
-            // Get root if start not specified
-            let start_node = if let Some(s) = start {
-                s
-            } else {
-                match storage.arbor().tree_get(&tree_id).await {
-                    Ok(tree) => tree.root,
-                    Err(e) => {
-                        yield RenderResult::Err { message: e.to_string() };
-                        return;
-                    }
-                }
-            };
+        // Get root if start not specified
+        let start_node = if let Some(s) = start {
+            s
+        } else {
+            // `tree_get` fails with an `ArborError`; it reached the wire as
+            // `e.to_string()` before PLX-116 and still does, via the one
+            // `From<ClaudeCodeError> for TurnError` impl.
+            storage
+                .arbor()
+                .tree_get(&tree_id)
+                .await
+                .map_err(|e| ClaudeCodeError::Arbor(e.to_string()))?
+                .root
+        };
 
-            // Render messages
-            let messages = match storage.render_messages(&tree_id, &start_node, &end_node).await {
-                Ok(m) => m,
-                Err(e) => {
-                    yield RenderResult::Err { message: e.to_string() };
-                    return;
-                }
-            };
+        // Render messages
+        let messages = storage.render_messages(&tree_id, &start_node, &end_node).await?;
 
-            yield RenderResult::Ok { messages };
-        }
+        Ok(RenderOk { messages })
     }
 
     /// List all session files for a project
@@ -1024,17 +902,11 @@ impl<P: HubContext> ClaudeCode<P> {
     async fn sessions_list(
         &self,
         project_path: String,
-    ) -> impl Stream<Item = SessionsListResult> + Send + 'static {
-        stream! {
-            match sessions::list_sessions(&project_path).await {
-                Ok(sessions) => {
-                    yield SessionsListResult::Ok { sessions };
-                }
-                Err(e) => {
-                    yield SessionsListResult::Err { message: e };
-                }
-            }
-        }
+    ) -> Result<SessionsListOk, ClaudeCodeError> {
+        let sessions = sessions::list_sessions(&project_path)
+            .await
+            .map_err(ClaudeCodeError::SessionFile)?;
+        Ok(SessionsListOk { sessions })
     }
 
     /// Get events from a session file
@@ -1046,27 +918,22 @@ impl<P: HubContext> ClaudeCode<P> {
         &self,
         project_path: String,
         session_id: String,
-    ) -> impl Stream<Item = SessionsGetResult> + Send + 'static {
-        stream! {
-            match sessions::read_session(&project_path, &session_id).await {
-                Ok(events) => {
-                    let event_count = events.len();
-                    // Convert to JSON values for transport
-                    let events_json: Vec<serde_json::Value> = events.into_iter()
-                        .filter_map(|e| serde_json::to_value(e).ok())
-                        .collect();
+    ) -> Result<SessionsGetOk, ClaudeCodeError> {
+        let events = sessions::read_session(&project_path, &session_id)
+            .await
+            .map_err(ClaudeCodeError::SessionFile)?;
 
-                    yield SessionsGetResult::Ok {
-                        session_id: session_id.clone(),
-                        event_count,
-                        events: events_json,
-                    };
-                }
-                Err(e) => {
-                    yield SessionsGetResult::Err { message: e };
-                }
-            }
-        }
+        let event_count = events.len();
+        // Convert to JSON values for transport
+        let events_json: Vec<serde_json::Value> = events.into_iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect();
+
+        Ok(SessionsGetOk {
+            session_id,
+            event_count,
+            events: events_json,
+        })
     }
 
     /// Import a session file into arbor
@@ -1080,24 +947,17 @@ impl<P: HubContext> ClaudeCode<P> {
         project_path: String,
         session_id: String,
         owner_id: Option<String>,
-    ) -> impl Stream<Item = SessionsImportResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<SessionsImportOk, ClaudeCodeError> {
+        let owner = owner_id.unwrap_or_else(|| "claudecode".to_string());
 
-        stream! {
-            let owner = owner_id.unwrap_or_else(|| "claudecode".to_string());
+        let tree_id = sessions::import_to_arbor(self.storage.arbor(), &project_path, &session_id, &owner)
+            .await
+            .map_err(ClaudeCodeError::SessionFile)?;
 
-            match sessions::import_to_arbor(storage.arbor(), &project_path, &session_id, &owner).await {
-                Ok(tree_id) => {
-                    yield SessionsImportResult::Ok {
-                        tree_id,
-                        session_id,
-                    };
-                }
-                Err(e) => {
-                    yield SessionsImportResult::Err { message: e };
-                }
-            }
-        }
+        Ok(SessionsImportOk {
+            tree_id,
+            session_id,
+        })
     }
 
     /// Export an arbor tree to a session file
@@ -1111,22 +971,15 @@ impl<P: HubContext> ClaudeCode<P> {
         tree_id: TreeId,
         project_path: String,
         session_id: String,
-    ) -> impl Stream<Item = SessionsExportResult> + Send + 'static {
-        let storage = self.storage.clone();
+    ) -> Result<SessionsExportOk, ClaudeCodeError> {
+        sessions::export_from_arbor(self.storage.arbor(), &tree_id, &project_path, &session_id)
+            .await
+            .map_err(ClaudeCodeError::SessionFile)?;
 
-        stream! {
-            match sessions::export_from_arbor(storage.arbor(), &tree_id, &project_path, &session_id).await {
-                Ok(()) => {
-                    yield SessionsExportResult::Ok {
-                        tree_id,
-                        session_id,
-                    };
-                }
-                Err(e) => {
-                    yield SessionsExportResult::Err { message: e };
-                }
-            }
-        }
+        Ok(SessionsExportOk {
+            tree_id,
+            session_id,
+        })
     }
 
     /// Delete a session file
@@ -1138,20 +991,15 @@ impl<P: HubContext> ClaudeCode<P> {
         &self,
         project_path: String,
         session_id: String,
-    ) -> impl Stream<Item = SessionsDeleteResult> + Send + 'static {
-        stream! {
-            match sessions::delete_session(&project_path, &session_id).await {
-                Ok(()) => {
-                    yield SessionsDeleteResult::Ok {
-                        session_id,
-                        deleted: true,
-                    };
-                }
-                Err(e) => {
-                    yield SessionsDeleteResult::Err { message: e };
-                }
-            }
-        }
+    ) -> Result<SessionsDeleteOk, ClaudeCodeError> {
+        sessions::delete_session(&project_path, &session_id)
+            .await
+            .map_err(ClaudeCodeError::SessionFile)?;
+
+        Ok(SessionsDeleteOk {
+            session_id,
+            deleted: true,
+        })
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1193,7 +1041,7 @@ impl<P: HubContext> ClaudeCode<P> {
 }
 
 // Background task implementation (outside the hub_methods block)
-impl<P: HubContext> ClaudeCode<P> {
+impl ClaudeCode {
     /// Run chat in background, pushing events to stream buffer
     async fn run_chat_background(
         storage: Arc<ClaudeCodeStorage>,
@@ -1797,16 +1645,9 @@ impl SessionActivation {
 
     /// Fetch this session's configuration.
     #[plexus_macros::method]
-    pub(super) async fn get(&self) -> impl Stream<Item = GetResult> + Send + 'static {
-        let storage = self.storage.clone();
-        let session_id = self.session_id;
-
-        stream! {
-            match storage.session_get(&session_id).await {
-                Ok(config) => yield GetResult::Ok { config },
-                Err(e) => yield GetResult::Err { message: e.to_string() },
-            }
-        }
+    pub(super) async fn get(&self) -> Result<GetOk, ClaudeCodeError> {
+        let config = self.storage.session_get(&self.session_id).await?;
+        Ok(GetOk { config })
     }
 
     /// Delete this session.
@@ -1815,16 +1656,9 @@ impl SessionActivation {
     /// further method invocations on the same `SessionActivation` will
     /// return `SessionNotFound`-style errors.
     #[plexus_macros::method]
-    pub(super) async fn delete(&self) -> impl Stream<Item = DeleteResult> + Send + 'static {
-        let storage = self.storage.clone();
-        let session_id = self.session_id;
-
-        stream! {
-            match storage.session_delete(&session_id).await {
-                Ok(()) => yield DeleteResult::Ok { id: session_id },
-                Err(e) => yield DeleteResult::Err { message: e.to_string() },
-            }
-        }
+    pub(super) async fn delete(&self) -> Result<DeleteOk, ClaudeCodeError> {
+        self.storage.session_delete(&self.session_id).await?;
+        Ok(DeleteOk { id: self.session_id })
     }
 }
 
@@ -1841,7 +1675,7 @@ mod ir18_tests {
     use crate::plexus::{Activation, ChildRouter, MethodRole};
 
     /// Spin up a `ClaudeCode` backed by temp-file storage for router tests.
-    async fn setup_claudecode() -> (ClaudeCode<crate::plexus::NoParent>, std::path::PathBuf, std::path::PathBuf) {
+    async fn setup_claudecode() -> (ClaudeCode, std::path::PathBuf, std::path::PathBuf) {
         let temp_dir = std::env::temp_dir();
         let test_id = uuid::Uuid::new_v4();
         let arbor_path = temp_dir.join(format!("test_ir18_arbor_{test_id}.db"));
@@ -1865,7 +1699,7 @@ mod ir18_tests {
             .unwrap(),
         );
 
-        (ClaudeCode::<crate::plexus::NoParent>::new(storage), arbor_path, claudecode_path)
+        (ClaudeCode::new(storage), arbor_path, claudecode_path)
     }
 
     // AC #3: `plugin_schema()` on ClaudeCode contains a `session` method tagged

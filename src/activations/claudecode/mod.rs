@@ -12,10 +12,10 @@ pub use executor::{check_mcp_reachable, ClaudeCodeExecutor, LaunchConfig};
 pub use storage::{ClaudeCodeStorage, ClaudeCodeStorageConfig};
 pub use sessions::{AssistantEvent, AssistantMessage, ContentBlock, SessionEvent, UserEvent, UserMessage};
 pub use types::{
-    BufferedEvent, ChatEvent, ChatStartResult, ChatUsage, ClaudeCodeConfig,
-    ClaudeCodeError, ClaudeCodeHandle, ClaudeCodeId, ClaudeCodeInfo, CreateResult, DeleteResult,
-    ForkResult, GetResult, ListResult, Message, MessageId, MessageRole, Model,
-    NodeEvent, PollResult, Position, RawClaudeEvent, RawContentBlock, RawMessage,
-    SessionsDeleteResult, SessionsExportResult, SessionsGetResult, SessionsImportResult, SessionsListResult,
-    StreamId, StreamInfo, StreamListResult, StreamStatus,
+    BufferedEvent, ChatEvent, ChatStartOk, ChatUsage, ClaudeCodeConfig,
+    ClaudeCodeError, ClaudeCodeHandle, ClaudeCodeId, ClaudeCodeInfo, CreateResult, DeleteOk,
+    ForkOk, GetOk, ListOk, Message, MessageId, MessageRole, Model,
+    NodeEvent, PollOk, Position, RawClaudeEvent, RawContentBlock, RawMessage,
+    SessionsDeleteOk, SessionsExportOk, SessionsGetOk, SessionsImportOk, SessionsListOk,
+    StreamId, StreamInfo, StreamListOk, StreamStatus,
 };

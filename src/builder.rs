@@ -35,9 +35,11 @@ use registry::Registry;
 /// Hub activations (with nested children) are registered with `register_hub`
 /// to enable direct nested routing like `substrate.solar.mercury.info`.
 ///
-/// This function uses `Arc::new_cyclic` to inject a weak reference to the hub
-/// into Cone and `ClaudeCode`, enabling them to resolve foreign handles through
-/// the hub without creating reference cycles.
+/// This function uses `Arc::new_cyclic` to obtain a weak reference to the hub for
+/// Orcha, which names it in its own type. PLX-111/116/117 removed the
+/// parent-injection ritual: Cone and `ClaudeCode` are handle *providers* and never
+/// needed a parent, and Arbor's handle was a `plugin_id -> resolver` lookup, wired
+/// below as data.
 ///
 /// This function is async because Arbor, Cone, and `ClaudeCode` require
 /// async database initialization.
@@ -61,7 +63,7 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
     )
     .await
     .expect("Failed to initialize ClaudeCode storage");
-    let claudecode: ClaudeCode<Weak<DynamicHub>> = ClaudeCode::with_context_type(Arc::new(claudecode_storage));
+    let claudecode: ClaudeCode = ClaudeCode::with_context_type(Arc::new(claudecode_storage));
 
     // Initialize Mustache for template rendering
     let mustache = Mustache::new(MustacheStorageConfig::default())
@@ -110,9 +112,11 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
         .await
         .expect("Failed to initialize Registry");
 
-    // Use Arc::new_cyclic to get a Weak<DynamicHub> during construction
-    // This allows us to inject the parent context into Cone and ClaudeCode
-    // before the hub is fully constructed, avoiding reference cycles
+    // Use Arc::new_cyclic to get a Weak<DynamicHub> during construction.
+    // PLX-111/116/117: the parent-injection ritual is gone — Arbor's handle was a
+    // `plugin_id -> resolver` lookup (now wired as data below), and Cone's and
+    // ClaudeCode's parent accessors had zero callers. Only Orcha still needs the
+    // weak handle, to name its own `Weak<DynamicHub>` parameter.
     //
     // We keep a clone of `orcha` outside the closure so we can call
     // `recover_running_graphs` after the hub is fully assembled.
@@ -130,7 +134,6 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
 
     let hub = Arc::new_cyclic(|weak_hub: &Weak<DynamicHub>| {
         // Inject parent context into activations that need it
-        claudecode.inject_parent(weak_hub.clone());
 
         // Initialize Orcha with dependencies (needs to be inside closure to access claudecode)
         let graph_runtime = Arc::new(GraphRuntime::new(lattice.storage()));

@@ -2,7 +2,6 @@ use crate::activations::arbor::ArborStorage;
 use crate::activations::claudecode::{ChatEvent, ClaudeCode, CreateResult, Model};
 use crate::activations::claudecode_loopback::LoopbackStorage;
 use crate::activations::lattice::{LatticeEvent, LatticeEventEnvelope, NodeOutput, NodeSpec, Token, TokenPayload};
-use crate::plexus::HubContext;
 use async_stream::stream;
 use futures::{Stream, StreamExt};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -26,9 +25,9 @@ type CancelRegistry = Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::watch:
 ///
 /// Returns a stream of `OrchaEvent` for monitoring.
 /// The stream closes when the graph reaches `GraphDone` or `GraphFailed`.
-pub(super) fn run_graph_execution<P: HubContext + 'static>(
+pub(super) fn run_graph_execution(
     graph: Arc<OrchaGraph>,
-    claudecode: Arc<ClaudeCode<P>>,
+    claudecode: Arc<ClaudeCode>,
     arbor_storage: Arc<ArborStorage>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,
@@ -173,8 +172,8 @@ pub(super) fn run_graph_execution<P: HubContext + 'static>(
 }
 
 /// Dispatch a single node to its type handler.
-async fn dispatch_node<P: HubContext + 'static>(
-    claudecode: Arc<ClaudeCode<P>>,
+async fn dispatch_node(
+    claudecode: Arc<ClaudeCode>,
     arbor: Arc<ArborStorage>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,
@@ -292,8 +291,8 @@ async fn dispatch_review(
 /// Any resolved input tokens with `{"text": "..."}` data are concatenated as `<prior_work>`.
 /// Loopback is enabled so tool-use approval requests are routed through the orcha approval API,
 /// keyed by `graph_id` so callers can poll `list_pending_approvals(session_id=graph_id)`.
-async fn dispatch_task<P: HubContext + 'static>(
-    claudecode: Arc<ClaudeCode<P>>,
+async fn dispatch_task(
+    claudecode: Arc<ClaudeCode>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,
     task: String,
@@ -521,8 +520,8 @@ async fn dispatch_task<P: HubContext + 'static>(
 /// Dispatch a "synthesize" node — like task, but prepends a `<join_context>` block
 /// listing the intent of upstream task/synthesize nodes so the join agent knows
 /// what each contributing branch was trying to accomplish.
-async fn dispatch_synthesize<P: HubContext + 'static>(
-    claudecode: Arc<ClaudeCode<P>>,
+async fn dispatch_synthesize(
+    claudecode: Arc<ClaudeCode>,
     _arbor: Arc<ArborStorage>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,
@@ -576,8 +575,8 @@ async fn dispatch_synthesize<P: HubContext + 'static>(
 ///
 /// On child `GraphDone` → emits `Token::ok_data({"child_graph_id": "..."})`.
 /// On child `GraphFailed` → returns `Err(...)` so the parent node is failed.
-async fn dispatch_subgraph<P: HubContext + 'static>(
-    claudecode: Arc<ClaudeCode<P>>,
+async fn dispatch_subgraph(
+    claudecode: Arc<ClaudeCode>,
     arbor: Arc<ArborStorage>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,
@@ -620,8 +619,8 @@ async fn dispatch_subgraph<P: HubContext + 'static>(
 /// 2. Compile the ticket source into nodes + edges
 /// 3. Build a child graph under the current graph
 /// 4. Execute the child graph, forwarding events to the parent stream
-async fn dispatch_plan<P: HubContext + 'static>(
-    claudecode: Arc<ClaudeCode<P>>,
+async fn dispatch_plan(
+    claudecode: Arc<ClaudeCode>,
     arbor: Arc<ArborStorage>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,
@@ -831,8 +830,8 @@ fn is_empty_output(output: &NodeOutput) -> bool {
     output_text(output).is_none_or(|t| t.is_empty())
 }
 
-async fn dispatch_task_with_retry<P: HubContext + 'static>(
-    claudecode: Arc<ClaudeCode<P>>,
+async fn dispatch_task_with_retry(
+    claudecode: Arc<ClaudeCode>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,
     task: String,
@@ -883,8 +882,8 @@ async fn dispatch_task_with_retry<P: HubContext + 'static>(
     Err(last_error.unwrap_or_else(|| "Task failed after all retries".to_string()))
 }
 
-async fn dispatch_synthesize_with_retry<P: HubContext + 'static>(
-    claudecode: Arc<ClaudeCode<P>>,
+async fn dispatch_synthesize_with_retry(
+    claudecode: Arc<ClaudeCode>,
     arbor: Arc<ArborStorage>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,
@@ -950,8 +949,8 @@ async fn dispatch_synthesize_with_retry<P: HubContext + 'static>(
 ///    of bare `Token::ok()`.  A downstream `[agent/synthesize]` blocked on this
 ///    validate node therefore receives fresh `<prior_work>` context regardless
 ///    of how many retries occurred.
-async fn dispatch_validate_with_retry<P: HubContext + 'static>(
-    claudecode: Arc<ClaudeCode<P>>,
+async fn dispatch_validate_with_retry(
+    claudecode: Arc<ClaudeCode>,
     arbor: Arc<ArborStorage>,
     loopback_storage: Arc<LoopbackStorage>,
     pm: Arc<Pm>,

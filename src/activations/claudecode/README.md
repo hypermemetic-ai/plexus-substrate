@@ -40,37 +40,37 @@ session via `synapse <backend> claudecode.session <id>.<method>`.
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `create` | `name: String, working_dir: String, model: Model, system_prompt: Option<String>, loopback_enabled: Option<bool>, loopback_session_id: Option<String>` | `Stream<Item=CreateResult>` | Create a new session. Canonicalizes `working_dir`; verifies MCP reachability when loopback is enabled. |
-| `get` | `name: String` | `Stream<Item=GetResult>` | Get session configuration by name. |
-| `list` | — | `Stream<Item=ListResult>` | List all sessions. |
-| `delete` | `name: String` | `Stream<Item=DeleteResult>` | Delete a session. |
-| `fork` | `name: String, new_name: String` | `Stream<Item=ForkResult>` | Fork a session at its current head into a new session. |
+| `create` | `name: String, working_dir: String, model: Model, system_prompt: Option<String>, loopback_enabled: Option<bool>, loopback_session_id: Option<String>` | `Stream<Item=CreateResult>` | **Not yet unary** (PLX-116 residual: eight in-process `orcha` call sites match on `CreateResult`). Create a new session. Canonicalizes `working_dir`; verifies MCP reachability when loopback is enabled. |
+| `get` | `name: String` | `Result<GetOk, ClaudeCodeError>` | Get session configuration by name. |
+| `list` | — | `Result<ListOk, ClaudeCodeError>` | List all sessions. |
+| `delete` | `name: String` | `Result<DeleteOk, ClaudeCodeError>` | Delete a session. |
+| `fork` | `name: String, new_name: String` | `Result<ForkOk, ClaudeCodeError>` | Fork a session at its current head into a new session. |
 
 ### Chat
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
 | `chat` | `name: String, prompt: String, ephemeral: Option<bool>, allowed_tools: Option<Vec<String>>` | `Stream<Item=ChatEvent>` (streaming) | Stream a chat turn. If `ephemeral=true`, nodes are created but the head is not advanced. |
-| `chat_async` | `name: String, prompt: String, ephemeral: Option<bool>` | `Stream<Item=ChatStartResult>` | Kick off a chat turn in the background and return a `stream_id` for polling. |
-| `poll` | `stream_id: StreamId, from_seq: Option<u64>, limit: Option<u64>` | `Stream<Item=PollResult>` | Poll a background chat for new events since `from_seq`. |
-| `streams` | `session_id: Option<ClaudeCodeId>` | `Stream<Item=StreamListResult>` | List active background streams, optionally filtered by session. |
+| `chat_async` | `name: String, prompt: String, ephemeral: Option<bool>` | `Result<ChatStartOk, ClaudeCodeError>` | Kick off a chat turn in the background and return a `stream_id` for polling. |
+| `poll` | `stream_id: StreamId, from_seq: Option<u64>, limit: Option<u64>` | `Result<PollOk, ClaudeCodeError>` | Poll a background chat for new events since `from_seq`. |
+| `streams` | `session_id: Option<ClaudeCodeId>` | `Result<StreamListOk, ClaudeCodeError>` | List active background streams, optionally filtered by session. |
 
 ### Tree / context
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `get_tree` | `name: String` | `Stream<Item=GetTreeResult>` | Return the Arbor tree id and current head node id for a session. |
-| `render_context` | `name: String, start: Option<NodeId>, end: Option<NodeId>` | `Stream<Item=RenderResult>` | Render the tree path between two nodes as a `Vec<Message>` suitable for the Claude API. |
+| `get_tree` | `name: String` | `Result<GetTreeOk, ClaudeCodeError>` | Return the Arbor tree id and current head node id for a session. |
+| `render_context` | `name: String, start: Option<NodeId>, end: Option<NodeId>` | `Result<RenderOk, ClaudeCodeError>` | Render the tree path between two nodes as a `Vec<Message>` suitable for the Claude API. |
 
 ### Session files (disk)
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `sessions_list` | `project_path: String` | `Stream<Item=SessionsListResult>` | List session files for a project path. |
-| `sessions_get` | `project_path: String, session_id: String` | `Stream<Item=SessionsGetResult>` | Read raw events from a session file. |
-| `sessions_import` | `project_path: String, session_id: String, owner_id: Option<String>` | `Stream<Item=SessionsImportResult>` | Import a session file into Arbor as a new tree. |
-| `sessions_export` | `tree_id: TreeId, project_path: String, session_id: String` | `Stream<Item=SessionsExportResult>` | Export an Arbor tree to a session file. |
-| `sessions_delete` | `project_path: String, session_id: String` | `Stream<Item=SessionsDeleteResult>` | Delete a session file. |
+| `sessions_list` | `project_path: String` | `Result<SessionsListOk, ClaudeCodeError>` | List session files for a project path. |
+| `sessions_get` | `project_path: String, session_id: String` | `Result<SessionsGetOk, ClaudeCodeError>` | Read raw events from a session file. |
+| `sessions_import` | `project_path: String, session_id: String, owner_id: Option<String>` | `Result<SessionsImportOk, ClaudeCodeError>` | Import a session file into Arbor as a new tree. |
+| `sessions_export` | `tree_id: TreeId, project_path: String, session_id: String` | `Result<SessionsExportOk, ClaudeCodeError>` | Export an Arbor tree to a session file. |
+| `sessions_delete` | `project_path: String, session_id: String` | `Result<SessionsDeleteOk, ClaudeCodeError>` | Delete a session file. |
 
 ## Children
 
@@ -85,8 +85,8 @@ Exposed via `claudecode.session <id>.<method>`:
 | Method | Params | Returns | Description |
 |---|---|---|---|
 | `chat` | `prompt: String, ephemeral: Option<bool>, allowed_tools: Option<Vec<String>>` | `Stream<Item=ChatEvent>` (streaming) | Mirror of the flat `chat` with the session pinned by id. |
-| `get` | — | `Stream<Item=GetResult>` | Fetch this session's config. |
-| `delete` | — | `Stream<Item=DeleteResult>` | Delete this session. |
+| `get` | — | `Result<GetOk, ClaudeCodeError>` | Fetch this session's config. |
+| `delete` | — | `Result<DeleteOk, ClaudeCodeError>` | Delete this session. |
 
 ## Handle system
 
@@ -115,8 +115,10 @@ backing database.
   persisted as an external Arbor node.
 - `ClaudeCodeExecutor` — spawns the Claude Code CLI and parses its event
   stream (see `executor.rs`).
-- Parent `HubContext` — injected via `inject_parent`; used to resolve
-  foreign handles while walking Arbor trees.
+- No parent handle. PLX-116 deleted the `P: HubContext` / `inject_parent`
+  ritual: PLX-109 §4 measured `ClaudeCode::parent()` at zero callers. The
+  `resolve_handle` / `resolve_handle_impl` pair is unaffected — `ClaudeCode`
+  is a handle *provider*, which never needed a parent.
 - `claudecode_loopback` + env `PLEXUS_MCP_URL` — loopback mode routes
   tool permissions through the parent.
 - `sessions.rs` — filesystem I/O over Claude Code's session files.
