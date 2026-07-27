@@ -22,11 +22,11 @@ pub type ClaudeCodeId = Uuid;
 #[derive(Debug, Clone, HandleEnum)]
 #[handle(
     plugin_id = "ClaudeCode::PLUGIN_ID",
-    // Pin the concrete instantiation of the generic
-    // `ClaudeCode<P: HubContext = NoParent>` activation so codegen emits
-    // `<ClaudeCode<NoParent>>::PLUGIN_ID` and rustc can resolve the
-    // associated constant without ambiguity (IR-21).
-    plugin_id_type = "ClaudeCode<::plexus_core::plexus::NoParent>",
+    // PLX-116: `ClaudeCode` is no longer generic (the `P: HubContext`
+    // parent-injection ritual is gone), so there is no instantiation left to
+    // pin — the IR-21 `plugin_id_type` override existed only to disambiguate
+    // `ClaudeCode<NoParent>` and is now the plain type.
+    plugin_id_type = "ClaudeCode",
     version = "1.0.0"
 )]
 pub enum ClaudeCodeHandle {
@@ -344,94 +344,68 @@ pub enum CreateResult {
     Err { message: String },
 }
 
-/// Result of getting a session
+// ───────────────────────────────────────────────────────────────────────────
+// PLX-116 / T1 — unary terminals.
+//
+// Each type below replaces a two-variant `XResult { Ok, Err }` enum. The `Err`
+// variant existed only because a stream was the sole channel a failure could
+// travel down (PLX-109 §2); with `#[activation]` compiling
+// `Result<T, E: Into<TurnError>>` (PLX-110) the failure is the turn's terminal
+// and the success shape needs no discriminant. Field names are preserved
+// verbatim from the old `Ok` variants.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Terminal of `get` / `session.get` — a session's configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-// Boxing `ClaudeCodeConfig` here would change the public Rust API; the enum
-// is JSON-serialized on the wire and size asymmetry in memory is acceptable.
-#[allow(clippy::large_enum_variant)]
-pub enum GetResult {
-    #[serde(rename = "ok")]
-    Ok { config: ClaudeCodeConfig },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct GetOk {
+    pub config: ClaudeCodeConfig,
 }
 
-/// Result of listing sessions
+/// Terminal of `list` — every session known to this activation.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ListResult {
-    #[serde(rename = "ok")]
-    Ok { sessions: Vec<ClaudeCodeInfo> },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct ListOk {
+    pub sessions: Vec<ClaudeCodeInfo>,
 }
 
-/// Result of deleting a session
+/// Terminal of `delete` / `session.delete` — the session that was removed.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum DeleteResult {
-    #[serde(rename = "deleted")]
-    Ok { id: ClaudeCodeId },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct DeleteOk {
+    pub id: ClaudeCodeId,
 }
 
-/// Result of forking a session
+/// Terminal of `fork` — the new session and the head it branched from.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ForkResult {
-    #[serde(rename = "forked")]
-    Ok {
-        id: ClaudeCodeId,
-        head: Position,
-    },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct ForkOk {
+    pub id: ClaudeCodeId,
+    pub head: Position,
 }
 
-/// Result of starting an async chat (non-blocking)
+/// Terminal of `chat_async` — the buffer to poll and the session it belongs to.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChatStartResult {
-    #[serde(rename = "started")]
-    Ok {
-        stream_id: StreamId,
-        session_id: ClaudeCodeId,
-    },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct ChatStartOk {
+    pub stream_id: StreamId,
+    pub session_id: ClaudeCodeId,
 }
 
-/// Result of polling a stream for events
+/// Terminal of `poll` — a window of buffered events plus buffer bookkeeping.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PollResult {
-    #[serde(rename = "ok")]
-    Ok {
-        /// Current stream status
-        status: StreamStatus,
-        /// Events since last poll (or from specified offset)
-        events: Vec<BufferedEvent>,
-        /// Current read position after this poll
-        read_position: u64,
-        /// Total events in buffer
-        total_events: u64,
-        /// True if there are more events available
-        has_more: bool,
-    },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct PollOk {
+    /// Current stream status
+    pub status: StreamStatus,
+    /// Events since last poll (or from specified offset)
+    pub events: Vec<BufferedEvent>,
+    /// Current read position after this poll
+    pub read_position: u64,
+    /// Total events in buffer
+    pub total_events: u64,
+    /// True if there are more events available
+    pub has_more: bool,
 }
 
-/// Result of listing active streams
+/// Terminal of `streams` — active background chat buffers.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum StreamListResult {
-    #[serde(rename = "ok")]
-    Ok { streams: Vec<StreamInfo> },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct StreamListOk {
+    pub streams: Vec<StreamInfo>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -518,6 +492,44 @@ pub enum ClaudeCodeError {
 
     #[error("arbor error: {0}")]
     Arbor(String),
+
+    /// A `sessions::*` helper failed. Those helpers are stringly-typed at their
+    /// own boundary (`Result<_, String>`); this variant is the single place that
+    /// string is re-typed so it can reach `TurnError` through the one `From`
+    /// impl below rather than through an orphan `impl From<String>`.
+    #[error("session file error: {0}")]
+    SessionFile(String),
+}
+
+/// The **one** place `ClaudeCode` shapes a wire error (PLX-116).
+///
+/// PLX-110 fixed the bound at `E: Into<TurnError>` precisely so the macro
+/// guesses nothing: the author picks the code, the message, and (where the
+/// error type is serializable) the structured `details`. Concentrating that
+/// choice here rather than inlining `TurnError` construction at call sites is
+/// what makes **PLX-114** — the open question of whether the envelope's `code`
+/// is a JSON integer (RFC 002 §3.6 item 22) or the `String` `plexus-core`
+/// currently declares — a localized edit for this activation instead of a
+/// smear across fifteen methods.
+///
+/// `details` is left unset: `ClaudeCodeError` carries `std::io::Error` and
+/// `sqlx::Error` payloads and is not `Serialize`, so `TurnError::structured`
+/// is not reachable without changing the domain type. The code is therefore
+/// the machine-readable half and the `Display` text is the human half.
+impl From<ClaudeCodeError> for plexus_core::runtime::TurnError {
+    fn from(e: ClaudeCodeError) -> Self {
+        let code = match &e {
+            ClaudeCodeError::PathResolution { .. } => "claudecode.path_resolution",
+            ClaudeCodeError::SessionNotFound { .. } => "claudecode.session_not_found",
+            ClaudeCodeError::AmbiguousSession { .. } => "claudecode.ambiguous_session",
+            ClaudeCodeError::Database { .. } => "claudecode.database",
+            ClaudeCodeError::Parse { .. } => "claudecode.parse",
+            ClaudeCodeError::Serialization(_) => "claudecode.serialization",
+            ClaudeCodeError::Arbor(_) => "claudecode.arbor",
+            ClaudeCodeError::SessionFile(_) => "claudecode.session_file",
+        };
+        Self::new(code, e.to_string())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -789,82 +801,56 @@ pub enum ContentBlock {
     Thinking { thinking: String },
 }
 
-/// Result of `render_context` method
+/// Terminal of `render_context` — the tree path rendered as Claude messages.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum RenderResult {
-    #[serde(rename = "ok")]
-    Ok { messages: Vec<ClaudeMessage> },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub(super) struct RenderOk {
+    pub messages: Vec<ClaudeMessage>,
 }
 
-/// Result of `get_tree` method
+/// Terminal of `get_tree` — the session's Arbor tree and current head.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum GetTreeResult {
-    #[serde(rename = "ok")]
-    Ok { tree_id: TreeId, head: NodeId },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub(super) struct GetTreeOk {
+    pub tree_id: TreeId,
+    pub head: NodeId,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SESSION FILE CRUD RESULTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Result of `sessions_list` method
+/// Terminal of `sessions_list` — session file ids under a project path.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionsListResult {
-    #[serde(rename = "ok")]
-    Ok { sessions: Vec<String> },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct SessionsListOk {
+    pub sessions: Vec<String>,
 }
 
-/// Result of `sessions_get` method
+/// Terminal of `sessions_get` — the raw events read out of a session file.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionsGetResult {
-    #[serde(rename = "ok")]
-    Ok {
-        session_id: String,
-        event_count: usize,
-        events: Vec<serde_json::Value>,
-    },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct SessionsGetOk {
+    pub session_id: String,
+    pub event_count: usize,
+    pub events: Vec<serde_json::Value>,
 }
 
-/// Result of `sessions_import` method
+/// Terminal of `sessions_import` — the Arbor tree the file was imported into.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionsImportResult {
-    #[serde(rename = "ok")]
-    Ok { tree_id: TreeId, session_id: String },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct SessionsImportOk {
+    pub tree_id: TreeId,
+    pub session_id: String,
 }
 
-/// Result of `sessions_export` method
+/// Terminal of `sessions_export` — the tree and file that were written.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionsExportResult {
-    #[serde(rename = "ok")]
-    Ok { tree_id: TreeId, session_id: String },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct SessionsExportOk {
+    pub tree_id: TreeId,
+    pub session_id: String,
 }
 
-/// Result of `sessions_delete` method
+/// Terminal of `sessions_delete` — the file that was removed.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SessionsDeleteResult {
-    #[serde(rename = "ok")]
-    Ok { session_id: String, deleted: bool },
-    #[serde(rename = "error")]
-    Err { message: String },
+pub struct SessionsDeleteOk {
+    pub session_id: String,
+    pub deleted: bool,
 }
 
 #[cfg(test)]
@@ -902,8 +888,8 @@ mod tests {
         let _schema = schema_for!(NodeEvent);
         let _schema = schema_for!(ClaudeMessage);
         let _schema = schema_for!(ContentBlock);
-        let _schema = schema_for!(RenderResult);
-        let _schema = schema_for!(GetTreeResult);
+        let _schema = schema_for!(RenderOk);
+        let _schema = schema_for!(GetTreeOk);
     }
 
     #[test]
@@ -991,10 +977,14 @@ mod tests {
         assert_eq!(json["input"]["path"], "/tmp/test.txt");
     }
 
+    // PLX-116: was `test_render_result_variants`, which asserted both arms of
+    // the `RenderResult { Ok, Err }` enum. `render_context` is now unary, so
+    // the failure arm is the turn's `TurnError` terminal (asserted by
+    // `render_error_maps_to_a_single_turnerror_code` below) and what remains to
+    // pin here is that the success payload kept its field name verbatim.
     #[test]
-    fn test_render_result_variants() {
-        // Test RenderResult::Ok
-        let result = RenderResult::Ok {
+    fn test_render_ok_payload() {
+        let ok = RenderOk {
             messages: vec![ClaudeMessage {
                 role: "user".to_string(),
                 content: vec![ContentBlock::Text {
@@ -1002,39 +992,51 @@ mod tests {
                 }],
             }],
         };
-        let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["type"], "ok");
+        let json = serde_json::to_value(&ok).unwrap();
         assert!(json["messages"].is_array());
-
-        // Test RenderResult::Err
-        let result = RenderResult::Err {
-            message: "test error".to_string(),
-        };
-        let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["type"], "error");
-        assert_eq!(json["message"], "test error");
+        assert_eq!(json["messages"][0]["role"], "user");
+        assert!(
+            json.get("type").is_none(),
+            "the `type` discriminant existed only to separate Ok from Err in one \
+             stream item type; with the error on the terminal there is one shape"
+        );
     }
 
+    // PLX-116: was `test_get_tree_result_variants` (see the note above).
     #[test]
-    fn test_get_tree_result_variants() {
+    fn test_get_tree_ok_payload() {
         use crate::activations::arbor::{NodeId, TreeId};
 
-        // Test GetTreeResult::Ok
         let tree_id = TreeId::new();
         let node_id = NodeId::new();
-        let result = GetTreeResult::Ok {
+        let ok = GetTreeOk {
             tree_id,
             head: node_id,
         };
-        let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["type"], "ok");
+        let json = serde_json::to_value(&ok).unwrap();
+        assert_eq!(json["tree_id"], serde_json::to_value(tree_id).unwrap());
+        assert_eq!(json["head"], serde_json::to_value(node_id).unwrap());
+    }
 
-        // Test GetTreeResult::Err
-        let result = GetTreeResult::Err {
-            message: "not found".to_string(),
-        };
-        let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["type"], "error");
-        assert_eq!(json["message"], "not found");
+    // PLX-116 / c2: the failure arms of the fifteen deleted Ok/Err enums all
+    // land in ONE place now. This test is what makes that claim checkable, and
+    // it is the test PLX-114 breaks (deliberately) if `TurnError.code` stops
+    // being a `String`.
+    #[test]
+    fn render_error_maps_to_a_single_turnerror_code() {
+        use plexus_core::runtime::TurnError;
+
+        let err: TurnError = ClaudeCodeError::SessionNotFound {
+            identifier: "nope".to_string(),
+        }
+        .into();
+        assert_eq!(err.code, "claudecode.session_not_found");
+        assert_eq!(err.message, "session not found: nope");
+
+        let err: TurnError = ClaudeCodeError::Arbor("tree gone".to_string()).into();
+        assert_eq!(err.code, "claudecode.arbor");
+
+        let err: TurnError = ClaudeCodeError::SessionFile("bad file".to_string()).into();
+        assert_eq!(err.code, "claudecode.session_file");
     }
 }

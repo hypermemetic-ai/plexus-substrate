@@ -63,7 +63,7 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
     )
     .await
     .expect("Failed to initialize ClaudeCode storage");
-    let claudecode: ClaudeCode<Weak<DynamicHub>> = ClaudeCode::with_context_type(Arc::new(claudecode_storage));
+    let claudecode: ClaudeCode = ClaudeCode::with_context_type(Arc::new(claudecode_storage));
 
     // Initialize Mustache for template rendering
     let mustache = Mustache::new(MustacheStorageConfig::default())
@@ -123,7 +123,6 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
         // Inject parent context into activations that need it
         arbor.inject_parent(weak_hub.clone());
         cone.inject_parent(weak_hub.clone());
-        claudecode.inject_parent(weak_hub.clone());
 
         // Initialize Orcha with dependencies (needs to be inside closure to access claudecode)
         let graph_runtime = Arc::new(GraphRuntime::new(lattice.storage()));
