@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Weak};
 
-use crate::activations::arbor::{Arbor, ArborConfig};
+use crate::activations::arbor::{Arbor, ArborConfig, HandleResolvers};
 use crate::activations::bash::Bash;
 #[cfg(feature = "chaos")]
 use crate::activations::chaos::Chaos;
@@ -43,15 +43,13 @@ use registry::Registry;
 /// async database initialization.
 pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
     // Initialize Arbor first (other activations depend on its storage)
-    // Use explicit type annotation for Weak<DynamicHub> parent context
-    let arbor: Arbor<Weak<DynamicHub>> = Arbor::with_context_type(ArborConfig::default())
+    let arbor = Arbor::new(ArborConfig::default())
         .await
         .expect("Failed to initialize Arbor");
     let arbor_storage = arbor.storage();
 
     // Initialize Cone with shared Arbor storage
-    // Use explicit type annotation for Weak<DynamicHub> parent context
-    let cone: Cone<Weak<DynamicHub>> = Cone::with_context_type(ConeStorageConfig::default(), arbor_storage.clone())
+    let cone = Cone::new(ConeStorageConfig::default(), arbor_storage.clone())
         .await
         .expect("Failed to initialize Cone");
 
@@ -119,10 +117,19 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
     // We keep a clone of `orcha` outside the closure so we can call
     // `recover_running_graphs` after the hub is fully assembled.
     let orcha_for_recovery: std::cell::OnceCell<Orcha<Weak<DynamicHub>>> = std::cell::OnceCell::new();
+
+    // PLX-117 / PLX-111: Arbor's parent handle was a `plugin_id -> resolver`
+    // lookup and nothing else, so it is wired here as data, after the two
+    // providers exist. `Arc::new_cyclic` / `Weak<DynamicHub>` are no longer part
+    // of Arbor's construction.
+    let arbor = arbor.with_resolvers(
+        HandleResolvers::new()
+            .with(Arc::new(cone.clone()))
+            .with(Arc::new(claudecode.clone())),
+    );
+
     let hub = Arc::new_cyclic(|weak_hub: &Weak<DynamicHub>| {
         // Inject parent context into activations that need it
-        arbor.inject_parent(weak_hub.clone());
-        cone.inject_parent(weak_hub.clone());
         claudecode.inject_parent(weak_hub.clone());
 
         // Initialize Orcha with dependencies (needs to be inside closure to access claudecode)

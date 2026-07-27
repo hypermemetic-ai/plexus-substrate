@@ -13,9 +13,9 @@ reference counts (`tree_claim` / `tree_release`) and has a scheduled-deletion
 
 Handle resolution is the cross-activation integration point. When an Arbor
 tree is rendered via `tree_render`, each external node's handle is resolved
-through the injected parent `HubContext` (typically a `Weak<DynamicHub>`) —
-so `arbor.tree_render` of a conversation built by Cone and ClaudeCode shows
-the actual message content, not just handle references.
+through an injected `HandleResolvers` map (PLX-117) — so `arbor.tree_render`
+of a conversation built by Cone and ClaudeCode shows the actual message
+content, not just handle references.
 
 Arbor's `ArborStorage` is intentionally **not** addressed through Plexus RPC
 for internal use; other activations that build on top of Arbor
@@ -74,8 +74,12 @@ plugin handle resolution and external callers. See the module-level doc on
 
 ## Composition
 
-- Parent context: `P: HubContext` (typically `Weak<DynamicHub>`) — injected
-  via `inject_parent` so `tree_render` can resolve foreign handles.
+- `HandleResolvers` — a `plugin_id -> resolver` map handed to Arbor at the
+  composition root (`builder.rs`, after Cone and ClaudeCode are built) so
+  `tree_render` can resolve foreign handles. It replaced the injected parent
+  `HubContext`: PLX-111 measured that the parent handle resolved exactly one
+  thing, routed on `plugin_id` alone, so the replacement is data, not a
+  runtime capability. An empty map degrades to `tree.render()`.
 - `Cone` and `ClaudeCode` hold `Arc<ArborStorage>` injected at their own
   construction time and call storage methods directly (in-process), not via
   Plexus-RPC.

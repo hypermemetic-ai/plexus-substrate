@@ -4,7 +4,10 @@ mod storage;
 mod types;
 mod views;
 
-pub use activation::{Arbor, ArborMethod};
+#[cfg(test)]
+mod tests;
+
+pub use activation::{Arbor, ArborMethod, HandleResolver, HandleResolvers};
 // Keep methods module for any helper types if needed
 pub use storage::{ArborConfig, ArborStorage};
 pub use types::{

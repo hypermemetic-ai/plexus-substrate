@@ -20,10 +20,9 @@ pub type ConeId = Uuid;
 #[derive(Debug, Clone, HandleEnum)]
 #[handle(
     plugin_id = "Cone::PLUGIN_ID",
-    // Pin the concrete instantiation of the generic `Cone<P: HubContext = NoParent>`
-    // activation so codegen emits `<Cone<NoParent>>::PLUGIN_ID` and rustc can
-    // resolve the associated constant without ambiguity (IR-21).
-    plugin_id_type = "Cone<::plexus_core::plexus::NoParent>",
+    // PLX-117: `Cone` is no longer generic, so the IR-21 pin that named
+    // `Cone<NoParent>` is now just the type itself.
+    plugin_id_type = "Cone",
     version = "1.0.0"
 )]
 pub enum ConeHandle {
@@ -192,8 +191,6 @@ pub enum CreateResult {
         /// Initial position (tree + root node)
         head: Position,
     },
-    #[serde(rename = "error")]
-    Error { message: String },
 }
 
 /// Result of cone.get
@@ -202,8 +199,6 @@ pub enum CreateResult {
 pub enum GetResult {
     #[serde(rename = "cone_data")]
     Data { cone: ConeConfig },
-    #[serde(rename = "error")]
-    Error { message: String },
 }
 
 /// Result of cone.list
@@ -212,8 +207,6 @@ pub enum GetResult {
 pub enum ListResult {
     #[serde(rename = "cone_list")]
     List { cones: Vec<ConeInfo> },
-    #[serde(rename = "error")]
-    Error { message: String },
 }
 
 /// Result of cone.delete
@@ -222,8 +215,6 @@ pub enum ListResult {
 pub enum DeleteResult {
     #[serde(rename = "cone_deleted")]
     Deleted { cone_id: ConeId },
-    #[serde(rename = "error")]
-    Error { message: String },
 }
 
 /// Events emitted during cone.chat (streaming)
@@ -266,8 +257,6 @@ pub enum SetHeadResult {
         old_head: Position,
         new_head: Position,
     },
-    #[serde(rename = "error")]
-    Error { message: String },
 }
 
 /// Result of cone.registry
@@ -303,7 +292,12 @@ pub struct ChatUsage {
 }
 
 /// Error type for cone operations
-#[derive(Debug, Clone, thiserror::Error)]
+///
+/// `Serialize` is derived (PLX-117) so `TurnError::structured` can carry the
+/// typed value in `details` rather than flattening it to a string, which
+/// RFC 002 §6.7 forbids at this boundary.
+#[derive(Debug, Clone, thiserror::Error, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConeError {
     #[error("Cone not found: {name}")]
     SessionNotFound { name: String },
@@ -324,5 +318,24 @@ impl From<String> for ConeError {
 impl From<&str> for ConeError {
     fn from(s: &str) -> Self {
         Self::InvalidState { message: s.to_string() }
+    }
+}
+
+/// The ONE place Cone's domain error becomes a wire error (PLX-110 / PLX-117).
+///
+/// Every unary `cone` method returns `Result<_, ConeError>`; this impl is the
+/// whole of the error shaping, which is what keeps PLX-114's open question about
+/// the envelope's `code` field a single-function change. Never construct a
+/// `TurnError` at a call site in this activation.
+impl From<ConeError> for plexus_core::runtime::TurnError {
+    fn from(e: ConeError) -> Self {
+        let code = match &e {
+            ConeError::SessionNotFound { .. } => "cone.not_found",
+            ConeError::StorageError { .. } => "cone.storage_error",
+            ConeError::ArborError { .. } => "cone.arbor_error",
+            ConeError::InvalidState { .. } => "cone.invalid_state",
+        };
+        let message = e.to_string();
+        Self::structured(code, message, &e)
     }
 }
