@@ -94,9 +94,32 @@ pub struct LaunchConfig {
     /// Permission prompt tool name
     pub permission_prompt_tool: Option<String>,
     /// Allowed tools
+    ///
+    /// Caller-supplied, and passed straight through to `--allowedTools`. This
+    /// is a *capability selector*, not a security boundary — see the note on
+    /// `disallowed_tools` below for where the boundary actually is.
     pub allowed_tools: Vec<String>,
-    /// Disallowed tools
-    pub disallowed_tools: Vec<String>,
+    // `disallowed_tools` was removed here (PLX-144 c5).
+    //
+    // It existed on this struct, was read when building the args, and was
+    // populated by no code path anywhere in the tree — PLX-130 counted four
+    // references: the field, its empty default, and the read. A lever with
+    // nothing attached is worse than no lever: it reads like a safety control
+    // and enforces nothing.
+    //
+    // It was deleted rather than wired, deliberately. Wiring it would have put
+    // a *security* boundary inside the Claude CLI's own permission model,
+    // which PLX-130 established is not a boundary substrate controls:
+    // `allowed_tools` is caller-supplied, `--permission-prompt-tool` routes to
+    // another Claude session (a probabilistic gate), and `.current_dir()`
+    // constrains the launcher, not what the launcher spawns. Populating this
+    // field would have manufactured assurance instead of enforcement.
+    //
+    // The enforcement point is process-level confinement: the `plexus-sandbox`
+    // crate (`../plexus-sandbox`), one container per tenant, exactly one bind
+    // mount at the tenant root. This launcher is NOT yet wired to it; that is
+    // a separate, smaller change, and until it lands `claudecode` must stay
+    // out of tenant mounts (PLX-127's exclusion list).
     /// Max turns
     pub max_turns: Option<i32>,
     /// Enable loopback mode - routes tool permissions through Plexus for parent approval
@@ -117,7 +140,6 @@ impl Default for LaunchConfig {
             mcp_config: None,
             permission_prompt_tool: None,
             allowed_tools: Vec::new(),
-            disallowed_tools: Vec::new(),
             max_turns: None,
             loopback_enabled: false,
             loopback_session_id: None,
@@ -219,11 +241,9 @@ impl ClaudeCodeExecutor {
             args.push(config.allowed_tools.join(","));
         }
 
-        // Disallowed tools
-        if !config.disallowed_tools.is_empty() {
-            args.push("--disallowedTools".to_string());
-            args.push(config.disallowed_tools.join(","));
-        }
+        // `--disallowedTools` is deliberately never emitted (PLX-144 c5); see
+        // the note on `LaunchConfig::allowed_tools`. Confinement is the
+        // `plexus-sandbox` crate's job, not the CLI's flag surface.
 
         // Query must be last
         args.push("--".to_string());
