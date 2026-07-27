@@ -283,30 +283,18 @@ impl ServerHandler for PlexusMcpBridge {
             };
             Ok(CallToolResult::error(vec![Content::text(error_content)]))
         } else {
-            // Convert buffered data to content
-            let text_content = if buffered_data.is_empty() {
-                "(no output)".to_string()
-            } else if buffered_data.len() == 1 {
-                // Single value - return as text if string, otherwise JSON
-                match &buffered_data[0] {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string_pretty(other).unwrap_or_default(),
-                }
-            } else {
-                // Multiple values - join strings or return as JSON array
-                let all_strings = buffered_data.iter().all(serde_json::Value::is_string);
-                if all_strings {
-                    buffered_data
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join("")
-                } else {
-                    serde_json::to_string_pretty(&buffered_data).unwrap_or_default()
-                }
-            };
-
-            Ok(CallToolResult::success(vec![Content::text(text_content)]))
+            // PLX-105: there were two byte-identical copies of the
+            // response-text rule — this one and `plexus-transport`'s
+            // `mcp/bridge.rs`. Both decide what a spawned Claude CLI reads back
+            // from `--permission-prompt-tool`, and neither was covered by a
+            // test. The rule now lives once, in
+            // `plexus_transport::mcp::bridge::render_tool_text`, where
+            // `tests/mcp_tool_text.rs` pins it and
+            // `tests/plx105_permission_wire.rs` drives the loopback through it
+            // end to end. Behaviour is unchanged.
+            Ok(CallToolResult::success(vec![Content::text(
+                plexus_transport::mcp::bridge::render_tool_text(&buffered_data),
+            )]))
         }
     }
 }

@@ -47,9 +47,39 @@ method. It is the CLI-facing half of the permission path and PLX-105 owns it.
 
 **A denial is still not an error.** `respond(approve = false)` succeeds, and the
 "no" reaches the CLI as an `Ok`-valued `{"behavior":"deny"}` payload out of
-`permit`. RFC 002 §6.6's `StopKind::Refused` — the spelling a denial should get
-once the loopback resolves through the turn callback — does not exist yet
-(PLX-112); `Err` is currently *defined* as `Failed`.
+`permit`. RFC 002 §6.6's `StopKind::Refused` is now *expressible* by a generated
+handler (PLX-112 landed `TurnStop` / `IntoTurnStop`), but it is still not
+*reached* here — a denial terminates the turn as `complete`, asserted by
+`tests/plx105_permission_wire.rs::a_denial_is_a_successful_turn_and_not_a_refusal`.
+
+## PLX-105 — what is blocked, and where
+
+PLX-105 set out to replace the poll loop with
+`client.request_permission_async(..).await`. It did not, and the reasons are
+structural rather than a matter of effort. All four were measured, two by
+compile probe:
+
+1. **A generated activation method cannot take a `Client<C>`.** The vNext IR
+   parser understands the handle, but the legacy `#[activation]` parser
+   (`plexus-macros/src/parse.rs`) has no branch for it and treats it as a wire
+   parameter. A compile probe returns `E0277: Client<(Permission,)>: Serialize
+   is not satisfied`. `Turn<C>::client()` is reachable only from a hand-written
+   `DeclaredHandler`, which `plexus-core`'s own `declared.rs` says is out of
+   scope to wire into the registration surface.
+2. **A generated activation's callbacks cannot be answered.** The emitted
+   `call_arc` passes `live: None` to `turn_stream_to_plexus_stream`, so the
+   `TurnControl` is dropped and nothing can call `respond`. A callback would be
+   emitted as a `PlexusStreamItem::Request` and never resolve.
+3. **The MCP gateway has no responder.** `mcp/bridge.rs` forwards a `Request`
+   item as a logging notification whose comment says the client "should respond
+   via `_plexus_respond`" — a tool that does not exist anywhere in the tree.
+4. **The peer is the wrong party.** `permit`'s turn is opened *by the spawned
+   CLI*. Its peer is the CLI, so `request_permission_async` would ask the asker.
+   The correlation this ticket wanted deleted is between two different turns
+   (the CLI's `permit` and the parent's `chat`), and `plexus-core`'s per-turn
+   router refuses cross-turn delivery by design (`RespondError::WrongTurn`).
+
+(1) and (2) live in `plexus-macros`, which PLX-105 is forbidden to touch.
 
 ## Storage
 
