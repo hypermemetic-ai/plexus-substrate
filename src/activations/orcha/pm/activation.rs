@@ -1,5 +1,5 @@
 use crate::activations::lattice::{LatticeStorage, NodeSpec, NodeStatus};
-use crate::activations::orcha::OrchaNodeKind;
+use crate::activations::orcha::{OrchaError, OrchaNodeKind};
 use async_stream::stream;
 use futures::Stream;
 use schemars::JsonSchema;
@@ -22,66 +22,49 @@ pub(super) struct PmTicketStatus {
     pub child_graph_id: Option<String>,
 }
 
+/// The terminal value of `graph_status`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum PmGraphStatusResult {
-    Ok {
-        graph_id: String,
-        graph_status: String,
-        tickets: Vec<PmTicketStatus>,
-    },
-    Err {
-        message: String,
-    },
+pub(super) struct PmGraphStatus {
+    pub graph_id: String,
+    pub graph_status: String,
+    pub tickets: Vec<PmTicketStatus>,
 }
 
+/// The terminal value of `what_next`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum PmWhatNextResult {
-    Ok {
-        graph_id: String,
-        tickets: Vec<PmTicketStatus>,
-    },
-    Err {
-        message: String,
-    },
+pub(super) struct PmWhatNext {
+    pub graph_id: String,
+    pub tickets: Vec<PmTicketStatus>,
 }
 
+/// The terminal value of `inspect_ticket`; `None` replaces the old `NotFound`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum PmInspectResult {
-    Ok {
-        ticket_id: String,
-        node_id: String,
-        status: String,
-        kind: String,
-        task: Option<String>,
-        command: Option<String>,
-        output: Option<Value>,
-        error: Option<String>,
-        child_graph_id: Option<String>,
-    },
-    NotFound {
-        ticket_id: String,
-    },
-    Err {
-        message: String,
-    },
+pub(super) struct PmTicketDetail {
+    pub ticket_id: String,
+    pub node_id: String,
+    pub status: String,
+    pub kind: String,
+    pub task: Option<String>,
+    pub command: Option<String>,
+    pub output: Option<Value>,
+    pub error: Option<String>,
+    pub child_graph_id: Option<String>,
 }
 
+/// The terminal value of `why_blocked`; an empty `blocked_by` is the old
+/// `NotBlocked` variant.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum PmWhyBlockedResult {
-    Ok {
-        ticket_id: String,
-        blocked_by: Vec<PmTicketStatus>,
-    },
-    NotBlocked {
-        ticket_id: String,
-    },
-    Err {
-        message: String,
-    },
+pub(super) struct PmBlockers {
+    pub ticket_id: String,
+    pub blocked_by: Vec<PmTicketStatus>,
+}
+
+/// The terminal value of `get_ticket_source`; `None` replaces the old
+/// `not_found` tagged object.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(super) struct PmTicketSource {
+    pub graph_id: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -95,16 +78,6 @@ pub(super) struct PmGraphSummary {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum PmListGraphsResult {
-    Ok {
-        graphs: Vec<PmGraphSummary>,
-    },
-    Err {
-        message: String,
-    },
-}
 
 // ─── Pm activation ────────────────────────────────────────────────────────────
 
@@ -233,81 +206,69 @@ impl Pm {
         &self,
         graph_id: String,
         recursive: Option<bool>,
-    ) -> impl Stream<Item = PmGraphStatusResult> + Send + 'static {
+    ) -> Result<PmGraphStatus, OrchaError> {
         let pm_storage = self.pm_storage.clone();
         let lattice_storage = self.lattice_storage.clone();
 
-        stream! {
-            let ticket_map = match pm_storage.get_ticket_map(&graph_id).await {
-                Ok(m) => m,
-                Err(e) => { yield PmGraphStatusResult::Err { message: e }; return; }
-            };
+        let ticket_map = pm_storage.get_ticket_map(&graph_id).await?;
 
-            let mut tickets = Vec::new();
-            let mut has_pending = false;
-            let mut has_ready = false;
-            let mut has_running = false;
-            let mut has_failed = false;
-            let mut all_complete = true;
+        let mut tickets = Vec::new();
+        let mut has_pending = false;
+        let mut has_ready = false;
+        let mut has_running = false;
+        let mut has_failed = false;
+        let mut all_complete = true;
 
-            for (ticket_id, node_id) in &ticket_map {
-                match lattice_storage.get_node(node_id).await {
-                    Ok(node) => {
-                        match node.status {
-                            NodeStatus::Pending  => { has_pending  = true; all_complete = false; }
-                            NodeStatus::Ready    => { has_ready    = true; all_complete = false; }
-                            NodeStatus::Running  => { has_running  = true; all_complete = false; }
-                            NodeStatus::Failed   => { has_failed   = true; all_complete = false; }
-                            NodeStatus::Complete => {}
-                        }
-                        let (kind, label) = extract_kind_and_label(&node.spec);
-                        let child_graph_id = if recursive.unwrap_or(false) && node.status == NodeStatus::Complete {
-                            node.output.as_ref().and_then(|o| {
-                                if let crate::activations::lattice::NodeOutput::Single(token) = o {
-                                    if let Some(crate::activations::lattice::TokenPayload::Data { value }) = &token.payload {
-                                        value.get("child_graph_id").and_then(|v| v.as_str()).map(std::string::ToString::to_string)
-                                    } else { None }
-                                } else { None }
-                            })
-                        } else {
-                            None
-                        };
-                        tickets.push(PmTicketStatus {
-                            ticket_id: ticket_id.clone(),
-                            node_id: node_id.clone(),
-                            status: node_status_str(&node.status).to_string(),
-                            kind,
-                            label,
-                            child_graph_id,
-                        });
-                    }
-                    Err(e) => {
-                        yield PmGraphStatusResult::Err {
-                            message: format!("Failed to get node {node_id}: {e}"),
-                        };
-                        return;
-                    }
-                }
+        for (ticket_id, node_id) in &ticket_map {
+            let node = lattice_storage.get_node(node_id).await.map_err(|e| {
+                OrchaError::storage("get_node", format!("Failed to get node {node_id}: {e}"))
+            })?;
+            match node.status {
+                NodeStatus::Pending  => { has_pending  = true; all_complete = false; }
+                NodeStatus::Ready    => { has_ready    = true; all_complete = false; }
+                NodeStatus::Running  => { has_running  = true; all_complete = false; }
+                NodeStatus::Failed   => { has_failed   = true; all_complete = false; }
+                NodeStatus::Complete => {}
             }
-
-            let graph_status = if has_failed {
-                "failed"
-            } else if has_running || has_ready {
-                "running"
-            } else if has_pending {
-                "pending"
-            } else if all_complete && !ticket_map.is_empty() {
-                "complete"
+            let (kind, label) = extract_kind_and_label(&node.spec);
+            let child_graph_id = if recursive.unwrap_or(false) && node.status == NodeStatus::Complete {
+                node.output.as_ref().and_then(|o| {
+                    if let crate::activations::lattice::NodeOutput::Single(token) = o {
+                        if let Some(crate::activations::lattice::TokenPayload::Data { value }) = &token.payload {
+                            value.get("child_graph_id").and_then(|v| v.as_str()).map(std::string::ToString::to_string)
+                        } else { None }
+                    } else { None }
+                })
             } else {
-                "pending"
+                None
             };
-
-            yield PmGraphStatusResult::Ok {
-                graph_id,
-                graph_status: graph_status.to_string(),
-                tickets,
-            };
+            tickets.push(PmTicketStatus {
+                ticket_id: ticket_id.clone(),
+                node_id: node_id.clone(),
+                status: node_status_str(&node.status).to_string(),
+                kind,
+                label,
+                child_graph_id,
+            });
         }
+
+        let graph_status = if has_failed {
+            "failed"
+        } else if has_running || has_ready {
+            "running"
+        } else if has_pending {
+            "pending"
+        } else if all_complete && !ticket_map.is_empty() {
+            "complete"
+        } else {
+            "pending"
+        };
+
+        Ok(PmGraphStatus {
+            graph_id,
+            graph_status: graph_status.to_string(),
+            tickets,
+        })
     }
 
     /// Get tickets that are ready or running (next actionable items).
@@ -317,43 +278,31 @@ impl Pm {
     async fn what_next(
         &self,
         graph_id: String,
-    ) -> impl Stream<Item = PmWhatNextResult> + Send + 'static {
+    ) -> Result<PmWhatNext, OrchaError> {
         let pm_storage = self.pm_storage.clone();
         let lattice_storage = self.lattice_storage.clone();
 
-        stream! {
-            let ticket_map = match pm_storage.get_ticket_map(&graph_id).await {
-                Ok(m) => m,
-                Err(e) => { yield PmWhatNextResult::Err { message: e }; return; }
-            };
+        let ticket_map = pm_storage.get_ticket_map(&graph_id).await?;
 
-            let mut tickets = Vec::new();
-            for (ticket_id, node_id) in &ticket_map {
-                match lattice_storage.get_node(node_id).await {
-                    Ok(node) => {
-                        if matches!(node.status, NodeStatus::Ready | NodeStatus::Running) {
-                            let (kind, label) = extract_kind_and_label(&node.spec);
-                            tickets.push(PmTicketStatus {
-                                ticket_id: ticket_id.clone(),
-                                node_id: node_id.clone(),
-                                status: node_status_str(&node.status).to_string(),
-                                kind,
-                                label,
-                                child_graph_id: None,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        yield PmWhatNextResult::Err {
-                            message: format!("Failed to get node {node_id}: {e}"),
-                        };
-                        return;
-                    }
-                }
+        let mut tickets = Vec::new();
+        for (ticket_id, node_id) in &ticket_map {
+            let node = lattice_storage.get_node(node_id).await.map_err(|e| {
+                OrchaError::storage("get_node", format!("Failed to get node {node_id}: {e}"))
+            })?;
+            if matches!(node.status, NodeStatus::Ready | NodeStatus::Running) {
+                let (kind, label) = extract_kind_and_label(&node.spec);
+                tickets.push(PmTicketStatus {
+                    ticket_id: ticket_id.clone(),
+                    node_id: node_id.clone(),
+                    status: node_status_str(&node.status).to_string(),
+                    kind,
+                    label,
+                    child_graph_id: None,
+                });
             }
-
-            yield PmWhatNextResult::Ok { graph_id, tickets };
         }
+
+        Ok(PmWhatNext { graph_id, tickets })
     }
 
     /// Inspect a single ticket in detail.
@@ -365,111 +314,54 @@ impl Pm {
         &self,
         graph_id: String,
         ticket_id: String,
-    ) -> impl Stream<Item = PmInspectResult> + Send + 'static {
+    ) -> Result<Option<PmTicketDetail>, OrchaError> {
         let pm_storage = self.pm_storage.clone();
         let lattice_storage = self.lattice_storage.clone();
 
-        stream! {
-            let ticket_map = match pm_storage.get_ticket_map(&graph_id).await {
-                Ok(m) => m,
-                Err(e) => { yield PmInspectResult::Err { message: e }; return; }
-            };
+        let ticket_map = pm_storage.get_ticket_map(&graph_id).await?;
 
-            let node_id = if let Some(id) = ticket_map.get(&ticket_id) { id.clone() } else { yield PmInspectResult::NotFound { ticket_id }; return; };
+        let Some(node_id) = ticket_map.get(&ticket_id).cloned() else {
+            return Ok(None);
+        };
 
-            let node = match lattice_storage.get_node(&node_id).await {
-                Ok(n) => n,
-                Err(e) => {
-                    yield PmInspectResult::Err {
-                        message: format!("Failed to get node: {e}"),
-                    };
-                    return;
-                }
-            };
+        let node = lattice_storage.get_node(&node_id).await.map_err(|e| {
+            OrchaError::storage("get_node", format!("Failed to get node: {e}"))
+        })?;
 
-            let status = node_status_str(&node.status).to_string();
-            let output = node.output.as_ref()
-                .map(|o| serde_json::to_value(o).unwrap_or(Value::Null));
-            let error = node.error.clone();
+        let status = node_status_str(&node.status).to_string();
+        let output = node.output.as_ref()
+            .map(|o| serde_json::to_value(o).unwrap_or(Value::Null));
+        let error = node.error.clone();
 
-            let child_graph_id = output.as_ref()
-                .and_then(|o| o.get("payload"))
-                .and_then(|p| p.get("value"))
-                .and_then(|v| v.get("child_graph_id"))
-                .and_then(|id| id.as_str())
-                .map(std::string::ToString::to_string);
+        let child_graph_id = output.as_ref()
+            .and_then(|o| o.get("payload"))
+            .and_then(|p| p.get("value"))
+            .and_then(|v| v.get("child_graph_id"))
+            .and_then(|id| id.as_str())
+            .map(std::string::ToString::to_string);
 
-            match &node.spec {
-                NodeSpec::Task { data, .. } => {
-                    match serde_json::from_value::<OrchaNodeKind>(data.clone()) {
-                        Ok(OrchaNodeKind::Task { task, .. }) => {
-                            yield PmInspectResult::Ok {
-                                ticket_id, node_id, status,
-                                kind: "task".to_string(),
-                                task: Some(task), command: None, output, error,
-                                child_graph_id,
-                            };
-                        }
-                        Ok(OrchaNodeKind::Synthesize { task, .. }) => {
-                            yield PmInspectResult::Ok {
-                                ticket_id, node_id, status,
-                                kind: "synthesize".to_string(),
-                                task: Some(task), command: None, output, error,
-                                child_graph_id,
-                            };
-                        }
-                        Ok(OrchaNodeKind::Validate { command, .. }) => {
-                            yield PmInspectResult::Ok {
-                                ticket_id, node_id, status,
-                                kind: "validate".to_string(),
-                                task: None, command: Some(command), output, error,
-                                child_graph_id,
-                            };
-                        }
-                        Ok(OrchaNodeKind::Review { prompt }) => {
-                            yield PmInspectResult::Ok {
-                                ticket_id, node_id, status,
-                                kind: "review".to_string(),
-                                task: Some(prompt), command: None, output, error,
-                                child_graph_id,
-                            };
-                        }
-                        Ok(OrchaNodeKind::Plan { task }) => {
-                            yield PmInspectResult::Ok {
-                                ticket_id, node_id, status,
-                                kind: "plan".to_string(),
-                                task: Some(task), command: None, output, error,
-                                child_graph_id,
-                            };
-                        }
-                        Err(_) => {
-                            yield PmInspectResult::Ok {
-                                ticket_id, node_id, status,
-                                kind: "task".to_string(),
-                                task: None, command: None, output, error,
-                                child_graph_id,
-                            };
-                        }
-                    }
-                }
-                NodeSpec::Gather { .. } => {
-                    yield PmInspectResult::Ok {
-                        ticket_id, node_id, status,
-                        kind: "gather".to_string(),
-                        task: None, command: None, output, error,
-                        child_graph_id,
-                    };
-                }
-                _ => {
-                    yield PmInspectResult::Ok {
-                        ticket_id, node_id, status,
-                        kind: "other".to_string(),
-                        task: None, command: None, output, error,
-                        child_graph_id,
-                    };
+        // (kind, task, command) — the only thing the old match arms differed on.
+        let (kind, task, command) = match &node.spec {
+            NodeSpec::Task { data, .. } => {
+                match serde_json::from_value::<OrchaNodeKind>(data.clone()) {
+                    Ok(OrchaNodeKind::Task { task, .. }) => ("task", Some(task), None),
+                    Ok(OrchaNodeKind::Synthesize { task, .. }) => ("synthesize", Some(task), None),
+                    Ok(OrchaNodeKind::Validate { command, .. }) => ("validate", None, Some(command)),
+                    Ok(OrchaNodeKind::Review { prompt }) => ("review", Some(prompt), None),
+                    Ok(OrchaNodeKind::Plan { task }) => ("plan", Some(task), None),
+                    Err(_) => ("task", None, None),
                 }
             }
-        }
+            NodeSpec::Gather { .. } => ("gather", None, None),
+            _ => ("other", None, None),
+        };
+
+        Ok(Some(PmTicketDetail {
+            ticket_id, node_id, status,
+            kind: kind.to_string(),
+            task, command, output, error,
+            child_graph_id,
+        }))
     }
 
     /// Explain why a ticket is blocked.
@@ -481,67 +373,51 @@ impl Pm {
         &self,
         graph_id: String,
         ticket_id: String,
-    ) -> impl Stream<Item = PmWhyBlockedResult> + Send + 'static {
+    ) -> Result<PmBlockers, OrchaError> {
         let pm_storage = self.pm_storage.clone();
         let lattice_storage = self.lattice_storage.clone();
 
-        stream! {
-            let ticket_map = match pm_storage.get_ticket_map(&graph_id).await {
-                Ok(m) => m,
-                Err(e) => { yield PmWhyBlockedResult::Err { message: e }; return; }
+        let ticket_map = pm_storage.get_ticket_map(&graph_id).await?;
+
+        let Some(node_id) = ticket_map.get(&ticket_id).cloned() else {
+            return Err(OrchaError::ValidationError {
+                detail: format!("Ticket not found: {ticket_id}"),
+            });
+        };
+
+        let predecessors = lattice_storage.get_inbound_edges(&node_id).await.map_err(|e| {
+            OrchaError::storage("get_inbound_edges", format!("Failed to get predecessors: {e}"))
+        })?;
+
+        let mut blocked_by = Vec::new();
+        for pred_id in predecessors {
+            let Ok(pred_node) = lattice_storage.get_node(&pred_id).await else {
+                continue;
             };
 
-            let node_id = if let Some(id) = ticket_map.get(&ticket_id) { id.clone() } else {
-                yield PmWhyBlockedResult::Err {
-                    message: format!("Ticket not found: {ticket_id}"),
-                };
-                return;
-            };
-
-            let predecessors = match lattice_storage.get_inbound_edges(&node_id).await {
-                Ok(p) => p,
-                Err(e) => {
-                    yield PmWhyBlockedResult::Err {
-                        message: format!("Failed to get predecessors: {e}"),
-                    };
-                    return;
-                }
-            };
-
-            let mut blocked_by = Vec::new();
-            for pred_id in predecessors {
-                let pred_node = match lattice_storage.get_node(&pred_id).await {
-                    Ok(n) => n,
-                    Err(_) => continue,
-                };
-
-                if pred_node.status == NodeStatus::Complete {
-                    continue;
-                }
-
-                let pred_ticket_id = pm_storage
-                    .get_ticket_for_node(&graph_id, &pred_id)
-                    .await
-                    .unwrap_or(None)
-                    .unwrap_or_else(|| pred_id.clone());
-
-                let (kind, label) = extract_kind_and_label(&pred_node.spec);
-                blocked_by.push(PmTicketStatus {
-                    ticket_id: pred_ticket_id,
-                    node_id: pred_id,
-                    status: node_status_str(&pred_node.status).to_string(),
-                    kind,
-                    label,
-                    child_graph_id: None,
-                });
+            if pred_node.status == NodeStatus::Complete {
+                continue;
             }
 
-            if blocked_by.is_empty() {
-                yield PmWhyBlockedResult::NotBlocked { ticket_id };
-            } else {
-                yield PmWhyBlockedResult::Ok { ticket_id, blocked_by };
-            }
+            let pred_ticket_id = pm_storage
+                .get_ticket_for_node(&graph_id, &pred_id)
+                .await
+                .unwrap_or(None)
+                .unwrap_or_else(|| pred_id.clone());
+
+            let (kind, label) = extract_kind_and_label(&pred_node.spec);
+            blocked_by.push(PmTicketStatus {
+                ticket_id: pred_ticket_id,
+                node_id: pred_id,
+                status: node_status_str(&pred_node.status).to_string(),
+                kind,
+                label,
+                child_graph_id: None,
+            });
         }
+
+        // An empty `blocked_by` is the old `NotBlocked` variant.
+        Ok(PmBlockers { ticket_id, blocked_by })
     }
 
     /// Get the raw ticket source for a graph.
@@ -551,15 +427,9 @@ impl Pm {
     async fn get_ticket_source(
         &self,
         graph_id: String,
-    ) -> impl Stream<Item = Value> + Send + 'static {
-        let pm_storage = self.pm_storage.clone();
-        stream! {
-            match pm_storage.get_ticket_source(&graph_id).await {
-                Ok(Some(source)) => yield serde_json::json!({ "type": "ok", "source": source }),
-                Ok(None) => yield serde_json::json!({ "type": "not_found", "graph_id": graph_id }),
-                Err(e) => yield serde_json::json!({ "type": "err", "message": e }),
-            }
-        }
+    ) -> Result<Option<PmTicketSource>, OrchaError> {
+        let source = self.pm_storage.get_ticket_source(&graph_id).await?;
+        Ok(source.map(|source| PmTicketSource { graph_id, source }))
     }
 
     /// List graphs tracked by the pm layer, optionally filtered by project metadata.
@@ -575,27 +445,20 @@ impl Pm {
         limit: Option<usize>,
         root_only: Option<bool>,
         status: Option<String>,
-    ) -> impl Stream<Item = PmListGraphsResult> + Send + 'static {
+    ) -> Result<Vec<PmGraphSummary>, OrchaError> {
         let pm_storage = self.pm_storage.clone();
         let lattice_storage = self.lattice_storage.clone();
 
-        stream! {
+        {
             let limit = limit.unwrap_or(20);
 
-            let entries = match pm_storage.list_ticket_maps(limit).await {
-                Ok(v) => v,
-                Err(e) => {
-                    yield PmListGraphsResult::Err { message: e };
-                    return;
-                }
-            };
+            let entries = pm_storage.list_ticket_maps(limit).await?;
 
             let mut graphs = Vec::new();
 
             for (graph_id, created_at) in entries {
-                let lattice_graph = match lattice_storage.get_graph(&graph_id).await {
-                    Ok(g) => g,
-                    Err(_) => continue,
+                let Ok(lattice_graph) = lattice_storage.get_graph(&graph_id).await else {
+                    continue;
                 };
 
                 // Apply root_only filter (default true — skip child graphs).
@@ -647,7 +510,7 @@ impl Pm {
                 });
             }
 
-            yield PmListGraphsResult::Ok { graphs };
+            Ok(graphs)
         }
     }
 

@@ -49,38 +49,38 @@ from where the crash happened.
 | Method | Params | Returns | Description |
 |---|---|---|---|
 | `run_task` | `request: RunTaskRequest` | `Stream<Item=OrchaEvent>` | Run a complete orchestration task with approval loops and validation. |
-| `run_task_async` | `request: RunTaskRequest` | `Stream<Item=RunTaskAsyncResult>` | Kick off `run_task` in the background; returns a session id. |
-| `create_session` | `request: CreateSessionRequest` | `Stream<Item=CreateSessionResult>` | Create a session record. |
-| `update_session_state` | `session_id: SessionId, state: SessionState` | `Stream<Item=UpdateSessionStateResult>` | Update a session's state. |
-| `get_session` | `request: GetSessionRequest` | `Stream<Item=GetSessionResult>` | Get a session by id. |
-| `list_sessions` | — | `Stream<Item=ListSessionsResult>` | List all sessions. |
-| `delete_session` | `session_id: SessionId` | `Stream<Item=DeleteSessionResult>` | Delete a session. |
-| `increment_retry` | `session_id: SessionId` | `Stream<Item=IncrementRetryResult>` | Increment a session's retry counter. |
-| `check_status` | `request: CheckStatusRequest` | `Stream<Item=CheckStatusResult>` | Summarize each agent (via Haiku) and produce a meta-summary for the session. |
-| `list_monitor_trees` | — | `Stream<Item=ListMonitorTreesResult>` | List Arbor trees used for status monitoring. |
+| `run_task_async` | `request: RunTaskRequest` | `Result<SessionRef, OrchaError>` | Kick off `run_task` in the background; returns a session id. |
+| `create_session` | `request: CreateSessionRequest` | `Result<SessionCreated, OrchaError>` | Create a session record. |
+| `update_session_state` | `session_id: SessionId, state: SessionState` | `Result<(), OrchaError>` | Update a session's state. |
+| `get_session` | `request: GetSessionRequest` | `Result<SessionInfo, OrchaError>` | Get a session by id. |
+| `list_sessions` | — | `Result<Vec<SessionInfo>, OrchaError>` | List all sessions. |
+| `delete_session` | `session_id: SessionId` | `Result<(), OrchaError>` | Delete a session. |
+| `increment_retry` | `session_id: SessionId` | `Result<RetryStatus, OrchaError>` | Increment a session's retry counter. |
+| `check_status` | `request: CheckStatusRequest` | `Result<StatusSummary, OrchaError>` | Summarize each agent (via Haiku) and produce a meta-summary for the session. |
+| `list_monitor_trees` | — | `Result<Vec<MonitorTreeInfo>, OrchaError>` | List Arbor trees used for status monitoring. |
 
 ### Validation protocol
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `extract_validation` | `text: String` | `Stream<Item=ExtractValidationResult>` | Extract a `{"orcha_validate": {...}}` artifact from accumulated text. |
-| `run_validation` | `artifact: ValidationArtifact` | `Stream<Item=RunValidationResult>` | Execute a validation `test_command` in its `cwd` and report pass/fail. |
+| `extract_validation` | `text: String` | `Result<Option<ValidationArtifact>, OrchaError>` | Extract a `{"orcha_validate": {...}}` artifact from accumulated text. |
+| `run_validation` | `artifact: ValidationArtifact` | `Result<ValidationResult, OrchaError>` | Execute a validation `test_command` in its `cwd` and report pass/fail. |
 
 ### Agents
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `spawn_agent` | `request: SpawnAgentRequest` | `Stream<Item=SpawnAgentResult>` | Spawn a new Claude-agent record for a session. |
-| `list_agents` | `request: ListAgentsRequest` | `Stream<Item=ListAgentsResult>` | List agents for a session. |
-| `get_agent` | `request: GetAgentRequest` | `Stream<Item=GetAgentResult>` | Get a specific agent. |
+| `spawn_agent` | `request: SpawnAgentRequest` | `Result<SpawnedAgent, OrchaError>` | Spawn a new Claude-agent record for a session. |
+| `list_agents` | `request: ListAgentsRequest` | `Result<Vec<AgentInfo>, OrchaError>` | List agents for a session. |
+| `get_agent` | `request: GetAgentRequest` | `Result<AgentInfo, OrchaError>` | Get a specific agent. |
 
 ### Approval brokering
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `list_pending_approvals` | `request: ListApprovalsRequest` | `Stream<Item=ListApprovalsResult>` | List pending loopback approvals for a session or graph. |
-| `approve_request` | `request: ApproveRequest` | `Stream<Item=ApprovalActionResult>` | Approve a pending loopback request. |
-| `deny_request` | `request: DenyRequest` | `Stream<Item=ApprovalActionResult>` | Deny a pending loopback request. |
+| `list_pending_approvals` | `request: ListApprovalsRequest` | `Result<Vec<ApprovalInfo>, OrchaError>` | List pending loopback approvals for a session or graph. |
+| `approve_request` | `request: ApproveRequest` | `Result<ApprovalOutcome, OrchaError>` | Approve a pending loopback request. |
+| `deny_request` | `request: DenyRequest` | `Result<ApprovalOutcome, OrchaError>` | Deny a pending loopback request. |
 | `subscribe_approvals` | `graph_id: String, timeout_secs: Option<u64>` | `Stream<Item=OrchaEvent>` | Watch a graph for approval requests (default 300s). |
 
 ### Graph execution
@@ -89,7 +89,7 @@ from where the crash happened.
 |---|---|---|---|
 | `run_graph` | `graph_id: String, model: Option<String>, working_directory: Option<String>` | `Stream<Item=OrchaEvent>` | Execute an existing Lattice graph through Orcha's Claude dispatcher. |
 | `run_plan` | `task: String, model: Option<String>, working_directory: Option<String>` | `Stream<Item=OrchaEvent>` | Ask Claude to plan a task as tickets, compile, execute. |
-| `cancel_graph` | `graph_id: String` | `Stream<Item=OrchaEvent>` | Cancel a running graph via a tracked `watch::Sender<bool>`. |
+| `cancel_graph` | `graph_id: String` | `Result<GraphRef, OrchaError>` | Cancel a running graph via a tracked `watch::Sender<bool>`. |
 | `subscribe_graph` | `graph_id: String, after_seq: Option<u64>` | `Stream<Item=OrchaEvent>` | Re-attach to a running graph's event stream, replaying from `after_seq`. |
 | `watch_graph_tree` | `graph_id: String, after_seq: Option<u64>` | `Stream<Item=OrchaEvent>` | Multiplex root + all child-graph events into one stream. |
 
@@ -97,21 +97,21 @@ from where the crash happened.
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `create_graph` | `metadata: Value` | `Stream<Item=OrchaCreateGraphResult>` | Create an empty graph. |
-| `add_task_node` | `graph_id: String, task: String` | `Stream<Item=OrchaAddNodeResult>` | Add a Claude task node. |
-| `add_synthesize_node` | `graph_id: String, task: String` | `Stream<Item=OrchaAddNodeResult>` | Add a synthesize node. |
-| `add_validate_node` | `graph_id: String, command: String, cwd: Option<String>` | `Stream<Item=OrchaAddNodeResult>` | Add a shell-validation node. |
-| `add_gather_node` | `graph_id: String, strategy: GatherStrategy` | `Stream<Item=OrchaAddNodeResult>` | Add a Gather node (`all` or `first N`). |
-| `add_subgraph_node` | `graph_id: String, child_graph_id: String` | `Stream<Item=OrchaAddNodeResult>` | Add a SubGraph node pointing at another graph. |
-| `add_dependency` | `graph_id: String, dependent_node_id: String, dependency_node_id: String` | `Stream<Item=OrchaAddDependencyResult>` | Declare a dependency edge. |
+| `create_graph` | `metadata: Value` | `Result<GraphRef, OrchaError>` | Create an empty graph. |
+| `add_task_node` | `graph_id: String, task: String` | `Result<NodeRef, OrchaError>` | Add a Claude task node. |
+| `add_synthesize_node` | `graph_id: String, task: String` | `Result<NodeRef, OrchaError>` | Add a synthesize node. |
+| `add_validate_node` | `graph_id: String, command: String, cwd: Option<String>` | `Result<NodeRef, OrchaError>` | Add a shell-validation node. |
+| `add_gather_node` | `graph_id: String, strategy: GatherStrategy` | `Result<NodeRef, OrchaError>` | Add a Gather node (`all` or `first N`). |
+| `add_subgraph_node` | `graph_id: String, child_graph_id: String` | `Result<NodeRef, OrchaError>` | Add a SubGraph node pointing at another graph. |
+| `add_dependency` | `graph_id: String, dependent_node_id: String, dependency_node_id: String` | `Result<(), OrchaError>` | Declare a dependency edge. |
 
 ### Ticket DSL
 
 | Method | Params | Returns | Description |
 |---|---|---|---|
-| `build_tickets` | `tickets: String, metadata: Value` | `Stream<Item=OrchaCreateGraphResult>` | Compile a ticket document and build the graph without running it. |
+| `build_tickets` | `tickets: String, metadata: Value` | `Result<GraphRef, OrchaError>` | Compile a ticket document and build the graph without running it. |
 | `run_tickets` | `tickets: String, metadata: Value, model: Option<String>, working_directory: Option<String>` | `Stream<Item=OrchaEvent>` | Compile + execute; detaches into a background task after `GraphStarted`. |
-| `run_tickets_async` | `tickets: String, metadata: Value, model: Option<String>, working_directory: Option<String>` | `Stream<Item=OrchaEvent>` | Fire-and-forget variant: returns `GraphStarted { graph_id }` and detaches. |
+| `run_tickets_async` | `tickets: String, metadata: Value, model: Option<String>, working_directory: Option<String>` | `Result<GraphRef, OrchaError>` | Fire-and-forget variant: returns the `graph_id` and detaches. |
 | `run_tickets_files` | `paths: Vec<String>, metadata: Value, model: Option<String>, working_directory: Option<String>` | `Stream<Item=OrchaEvent>` | Read N ticket files from disk, join, then `run_tickets`. |
 | `run_tickets_async_files` | `paths: Vec<String>, metadata: Value, model: Option<String>, working_directory: Option<String>` | `Stream<Item=OrchaEvent>` | Fire-and-forget variant of `run_tickets_files`. |
 | `run_graph_definition` | `metadata: Value, model: Option<String>, working_directory: Option<String>, nodes: Vec<OrchaNodeDef>, edges: Vec<OrchaEdgeDef>` | `Stream<Item=OrchaEvent>` | Build and run a graph from an inline node+edge definition. |
@@ -139,8 +139,10 @@ Orcha is a coordinator — it holds many `Arc`s:
 - `cancel_registry: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>` — a
   per-graph cancellation channel observed by the graph runner so
   `cancel_graph(graph_id)` can halt in-flight execution.
-- Parent `HubContext` — carried through `PhantomData<P>` for
-  `ClaudeCode<P>` inheritance.
+- Parent `HubContext` — the `P` parameter exists **only** to name the
+  `ClaudeCode<P>` this activation holds. PLX-115 deleted the `PhantomData<P>`
+  marker; the generic itself cannot go until `ClaudeCode` drops its own
+  (PLX-116).
 
 The actual per-node dispatch (Claude spawn, event pump, retry logic,
 approval wiring) lives in `graph_runner.rs`; the typed graph construction
