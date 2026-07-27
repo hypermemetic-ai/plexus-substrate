@@ -204,8 +204,17 @@ impl ServerHandler for PlexusMcpBridge {
                 PlexusStreamItem::Data {
                     content, content_type, ..
                 } => {
-                    // Buffer data for final result
-                    buffered_data.push(content.clone());
+                    // PLX-145: buffer what this item CONTRIBUTES. A turn
+                    // terminal's `{"stop":…,"value":…}` envelope is stripped —
+                    // the rule, and what it changes for every MCP tool, lives
+                    // once in `plexus_transport::mcp::bridge::tool_payload`,
+                    // which `plexus-transport`'s own `call_tool` also calls.
+                    if let Some(payload) = plexus_transport::mcp::bridge::tool_payload(
+                        content_type,
+                        content,
+                    ) {
+                        buffered_data.push(payload);
+                    }
 
                     // Also stream via notifications for real-time consumers
                     let _ = ctx
