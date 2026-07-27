@@ -10,7 +10,7 @@
 //! gap was a property of substrate's composition — two activations nobody
 //! declared, and three nested edges the wire had no route to.
 
-use plexus_core::ir::{ActivationIr, ChildEdge};
+use plexus_core::ir::ActivationIr;
 use plexus_substrate::activations::solar::Solar;
 
 /// Every Dynamic edge in the document, as `(path, advertised hash)`.
@@ -21,10 +21,11 @@ fn dynamic_edges(ir: &ActivationIr, path: &str, out: &mut Vec<(String, String)>)
         } else {
             format!("{path}/{}", c.namespace())
         };
-        match c {
-            ChildEdge::Static(sub) => dynamic_edges(sub, &p, out),
-            ChildEdge::Indexed { template, .. } => dynamic_edges(template, &p, out),
-            ChildEdge::Dynamic { hash, .. } => out.push((p, hash.clone())),
+        // PLX-160 — "is there a subtree here to walk into" is a DELIVERY
+        // question under both shapes, so one arm replaces three.
+        match c.child() {
+            Some(sub) => dynamic_edges(sub, &p, out),
+            None => out.push((p, c.advertised_hash().to_string())),
         }
     }
 }
@@ -163,21 +164,30 @@ async fn solar_advertises_one_edge_where_the_legacy_wire_advertises_eight() {
 
     let hub = plexus_substrate::builder::build_plexus_rpc().await;
     let doc = hub.connectome();
-    let ChildEdge::Static(solar_ir) = doc.child("solar").expect("solar is a child") else {
-        panic!("solar's subtree is embedded");
-    };
+    let solar_ir = doc
+        .child("solar")
+        .expect("solar is a child")
+        .child()
+        .expect("solar's subtree is embedded");
     assert_eq!(
         solar_ir.children.len(),
         1,
         "solar declares exactly one child edge in the Connectome"
     );
 
-    // NEGATIVE PIN — invert this when `#[child(list = ..)]` emits Indexed.
+    // PLX-160 — PLX-148's negative pin, INVERTED. It read: "solar/body is
+    // emitted as Dynamic; §5.1's Indexed is the shape it should reach for, and
+    // the enumeration facts it already declares are dropped by plexus-macros
+    // before they reach the wire." Both axes are now asserted, separately.
+    let body = &solar_ir.children[0];
     assert!(
-        matches!(solar_ir.children[0], ChildEdge::Dynamic { .. }),
-        "solar/body is emitted as Dynamic; §5.1's Indexed is the shape it should \
-         reach for, and the enumeration facts it already declares are dropped by \
-         plexus-macros before they reach the wire"
+        body.is_indexed(),
+        "solar/body declares `#[child(list = \"body_names\")]`, so its SHAPE is a family"
+    );
+    assert!(
+        body.is_lazy(),
+        "and its DELIVERY is unchanged — PLX-148 chose lazy for this edge and \
+         inverting the shape pin must not quietly embed the subtree"
     );
 
     // No planet name appears anywhere in the served bytes — the document is not
@@ -193,4 +203,69 @@ async fn solar_advertises_one_edge_where_the_legacy_wire_advertises_eight() {
     // The eight are reachable rather than listed: the shape every planet has is
     // one fetch away, and it is a real document now.
     assert!(hub.child_connectome("solar/body").is_some());
+}
+
+// ===========================================================================
+// PLX-160 — the lazy-SINGLE path must not disappear behind the lazy-INDEXED one
+// ===========================================================================
+
+/// PLX-148's c1 proved 9 of 9 lazy edges fetchable. PLX-160 converts five of
+/// those nine to an indexed SHAPE, which is a real risk to that evidence: if it
+/// had converted all nine, the suite would still have said "9 of 9" while no
+/// longer exercising a single lazy child at all.
+///
+/// It did not, and this test is what keeps that true. It asserts the population
+/// on BOTH axes, so a future change that empties either bucket fails here rather
+/// than quietly narrowing what "every lazy edge is fetchable" is measuring.
+#[tokio::test]
+async fn both_lazy_shapes_are_populated_so_neither_path_loses_its_coverage() {
+    let hub = plexus_substrate::builder::build_plexus_rpc().await;
+    let doc = hub.connectome();
+
+    fn split(ir: &ActivationIr, path: &str, single: &mut Vec<String>, indexed: &mut Vec<String>) {
+        for c in &ir.children {
+            let p = if path.is_empty() {
+                c.namespace().to_string()
+            } else {
+                format!("{path}/{}", c.namespace())
+            };
+            match c.child() {
+                Some(sub) => split(sub, &p, single, indexed),
+                None if c.is_indexed() => indexed.push(p),
+                None => single.push(p),
+            }
+        }
+    }
+
+    let (mut single, mut indexed) = (Vec::new(), Vec::new());
+    split(&doc, "", &mut single, &mut indexed);
+    single.sort();
+    indexed.sort();
+
+    assert_eq!(
+        single,
+        ["health", "registry", "tenants/health", "tenants/registry"],
+        "the lazy-SINGLE cell must stay exercised — this is PLX-148's evidence, \
+         and converting the other five must not be allowed to retire it"
+    );
+    assert_eq!(
+        indexed,
+        [
+            "claudecode/session",
+            "cone/of",
+            "solar/body",
+            "tenants/cone/of",
+            "tenants/solar/body"
+        ],
+        "and the lazy-INDEXED cell — the one that had no variant before PLX-160 — \
+         must be the five that declare `#[child(list = ..)]` on a dynamic child"
+    );
+
+    // Both buckets are still fetchable, which is the property PLX-148 bought.
+    for p in single.iter().chain(indexed.iter()) {
+        assert!(
+            hub.child_connectome(p).is_some(),
+            "{p} advertises a hash it cannot honour (§5.1 sufficiency)"
+        );
+    }
 }

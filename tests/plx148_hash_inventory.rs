@@ -3,7 +3,7 @@
 //! The mechanical form of "no hash moved": run it on the pristine tree, run it
 //! after the change, diff. PLX-150 set this standard and this is the same move
 //! over the Connectome rather than the legacy schema.
-use plexus_core::ir::{ActivationIr, ChildEdge};
+use plexus_core::ir::ActivationIr;
 
 fn walk(ir: &ActivationIr, path: &str, out: &mut Vec<String>) {
     out.push(format!("NODE\t{path}\t{}", ir.hash));
@@ -12,13 +12,21 @@ fn walk(ir: &ActivationIr, path: &str, out: &mut Vec<String>) {
     }
     for c in &ir.children {
         let p = format!("{path}/{}", c.namespace());
-        match c {
-            ChildEdge::Static(sub) => walk(sub, &p, out),
-            ChildEdge::Dynamic { hash, .. } => out.push(format!("EDGE\t{p}\t{hash}")),
-            ChildEdge::Indexed { template, .. } => {
-                out.push(format!("EDGE-INDEXED\t{p}"));
-                walk(template, &p, out);
-            }
+        // PLX-160 — two axes, two line kinds, so a movement on one is legible
+        // without a movement on the other. Deliberately chosen to keep the
+        // pre-PLX-160 `EDGE` line byte-identical: an edge's ADVERTISED hash is
+        // a delivery fact and does not move when its SHAPE changes, which is
+        // most of what this build has to prove.
+        //
+        // AXIS 1 — shape. Absent for a single child (replaces the old
+        // `EDGE-INDEXED` line, which conflated the two).
+        if c.is_indexed() {
+            out.push(format!("SHAPE\t{p}\tindexed"));
+        }
+        // AXIS 2 — delivery.
+        match c.child() {
+            Some(sub) => walk(sub, &p, out),
+            None => out.push(format!("EDGE\t{p}\t{}", c.advertised_hash())),
         }
     }
 }

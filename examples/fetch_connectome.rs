@@ -97,12 +97,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("methods={} children={}", ir.methods.len(), ir.children.len());
     for c in &ir.children {
-        let kind = match c {
-            plexus_core::ir::ChildEdge::Static(_) => "static",
-            plexus_core::ir::ChildEdge::Dynamic { .. } => "dynamic",
-            plexus_core::ir::ChildEdge::Indexed { .. } => "indexed",
-        };
-        println!("  edge {kind:<8} {}", c.namespace());
+        // PLX-160 — print the two axes, because there are two.
+        let shape = if c.is_indexed() { "indexed" } else { "single" };
+        let delivery = if c.is_lazy() { "lazy" } else { "embedded" };
+        println!("  edge {shape:<8} {delivery:<8} {}", c.namespace());
     }
 
     let text = serde_json::to_string_pretty(&document)?;
