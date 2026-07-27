@@ -2,7 +2,15 @@
 //!
 //! This module is used by both the main binary and examples.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use plexus_auth_core::tenant::TenantId;
+use plexus_sandbox::docker::{DockerConfig, DockerSandbox};
+use plexus_sandbox::Sandbox;
+
+use crate::activations::claudecode::Confinement;
+use crate::tenancy::TenantAdmission;
 
 use crate::activations::arbor::{Arbor, ArborConfig, HandleResolvers};
 use crate::activations::bash::Bash;
@@ -239,6 +247,127 @@ pub async fn build_activations() -> (SubstrateActivations, Orcha) {
 /// [`compose_host_hub`], [`compose_tenant_hub`] and
 /// [`TENANT_EXCLUDED_ACTIVATIONS`].
 pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
+    build_plexus_rpc_with_tenancy(None).await
+}
+
+/// PLX-151 — everything a deployment needs to run `claudecode` for a tenant.
+///
+/// Built once, at startup, by [`TenantExecution::detect`]. Holding one is what
+/// lets `build_plexus_rpc_with_tenancy` flip
+/// [`TenantSurface::claudecode_is_sandboxed`] to `true`: the flag and the
+/// capability are the same fact, so a deployment cannot claim to sandbox
+/// `claudecode` without owning a sandbox.
+#[derive(Clone)]
+pub struct TenantExecution {
+    sandbox: Arc<dyn Sandbox>,
+    admission: Arc<TenantAdmission>,
+    env: BTreeMap<String, String>,
+    cli: String,
+}
+
+impl std::fmt::Debug for TenantExecution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenantExecution")
+            .field("runtime", &self.sandbox.runtime())
+            .field("admission", &self.admission)
+            .field("cli", &self.cli)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl TenantExecution {
+    /// Detect the container runtime **at startup** and refuse to start without
+    /// one (PLX-151 c4, inheriting PLX-144 c4).
+    ///
+    /// `DockerSandbox::detect` is the only constructor Docker has and it is
+    /// fallible: it runs `docker version --format {{.Server.Version}}`, which
+    /// distinguishes a missing client from an unreachable daemon. Whatever it
+    /// says is what an operator sees, prefixed with what substrate was trying
+    /// to do — so "a substrate that cannot sandbox says so at startup, not at
+    /// the first chat turn."
+    ///
+    /// # Errors
+    ///
+    /// A message ready to print: the runtime, what was tried, the hint, and
+    /// the consequence of the failure.
+    pub async fn detect(
+        image: impl Into<String>,
+        admission: Arc<TenantAdmission>,
+    ) -> Result<Self, String> {
+        let image = image.into();
+        let sandbox = DockerSandbox::detect(DockerConfig::new(image.clone()))
+            .await
+            .map_err(|e| {
+                format!(
+                    "cannot start a tenanted substrate: {e}\n\
+                     tenant `claudecode` runs inside a per-tenant container (PLX-144/PLX-151), \
+                     so a substrate that cannot sandbox must not serve tenants.\n\
+                     image that would have been used: {image}\n\
+                     to run single-tenant instead, start without tenancy — the untenanted \
+                     path does not require a container runtime."
+                )
+            })?;
+        Ok(Self::with_sandbox(Arc::new(sandbox), admission))
+    }
+
+    /// Use an already-constructed backend. The runtime-agnostic seam: PLX-144
+    /// built `Sandbox` as a trait so podman and bubblewrap can be dropped in
+    /// here without substrate changing.
+    #[must_use]
+    pub fn with_sandbox(sandbox: Arc<dyn Sandbox>, admission: Arc<TenantAdmission>) -> Self {
+        Self {
+            sandbox,
+            admission,
+            env: BTreeMap::new(),
+            cli: "claude".to_owned(),
+        }
+    }
+
+    /// Set one environment variable for every tenant confinement.
+    ///
+    /// Nothing is inherited from the substrate process — PLX-130 finding C is
+    /// that substrate's launchers never scrubbed the environment, so
+    /// `ANTHROPIC_API_KEY` and `PLEXUS_MCP_URL` were readable by `env` inside a
+    /// tenant's shell. A credential a tenant's CLI needs must be named here,
+    /// deliberately.
+    #[must_use]
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Name the CLI inside the image. Defaults to `claude` on its `PATH`.
+    #[must_use]
+    pub fn with_cli(mut self, cli: impl Into<String>) -> Self {
+        self.cli = cli.into();
+        self
+    }
+
+    /// The confinement for one tenant.
+    #[must_use]
+    pub fn confinement_for(&self, tenant: &TenantId) -> Confinement {
+        let mut c = Confinement::new(
+            Arc::clone(&self.sandbox),
+            Arc::clone(&self.admission),
+            tenant.clone(),
+        )
+        .with_cli(self.cli.clone());
+        for (key, value) in &self.env {
+            c = c.with_env(key, value);
+        }
+        c
+    }
+}
+
+/// Build the hub, optionally with per-tenant confined execution.
+///
+/// `None` is the untenanted deployment: `claudecode` is absent from the tenant
+/// mount exactly as PLX-127 shipped it, and the host surface is unchanged. See
+/// `ClaudeCodeExecutor::spawn_on_host_unconfined` for what the host path gets.
+pub async fn build_plexus_rpc_with_tenancy(
+    tenancy: Option<TenantExecution>,
+) -> Arc<DynamicHub> {
     let (activations, orcha_for_recovery) = build_activations().await;
     let changelog = activations.changelog.clone();
     let activations = Arc::new(activations);
@@ -246,9 +375,15 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
     // PLX-127: the host hub is what it always was. The tenant hub is a
     // DIFFERENT composition of the SAME activations, and the difference is the
     // exclusion list — see `TENANT_EXCLUDED_ACTIVATIONS`.
+    //
+    // PLX-151: the flag and the capability are one fact. `claudecode` is in a
+    // tenant's surface exactly when this deployment has a sandbox to put it in.
     let host_activations = Arc::clone(&activations);
-    let tenant_surface = TenantSurface::default();
-    let factory: TenantSubtreeFactory = Arc::new(move |_admitted: &AdmittedTenant| {
+    let tenant_surface = TenantSurface {
+        claudecode_is_sandboxed: tenancy.is_some(),
+    };
+    let tenancy_for_factory = tenancy.clone();
+    let factory: TenantSubtreeFactory = Arc::new(move |admitted: &AdmittedTenant| {
         // Reached ONLY with an `AdmittedTenant` in hand, which only
         // `TenantMountGate::admit` can mint. See plexus-core's
         // `plexus::tenant_mount` for why that is the whole of "verify before
@@ -263,9 +398,24 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
         // instances) and PLX-129 (M4·E, per-tenant storage), and PLX-130 is
         // explicit that M4·E's value is conditional on these exclusions being
         // in place — which is the order this ticket lands in.
-        Some(Arc::new(compose_tenant_hub(
+        //
+        // PLX-151: the confinement is per tenant, and it is built from the
+        // ADMITTED id — `admitted.id()`, which only `TenantMountGate::admit`
+        // can have produced — never from a segment the caller spelled.
+        let confinement = match tenancy_for_factory.as_ref() {
+            Some(t) => Some(t.confinement_for(admitted.id())),
+            // A tenanted surface with no sandbox is refused outright rather
+            // than served with an unconfined `claudecode` in it. `None` here is
+            // the `Option` PLX-127 put on this factory "precisely so a composer
+            // can refuse".
+            None if tenant_surface.claudecode_is_sandboxed => return None,
+            None => None,
+        };
+
+        Some(Arc::new(compose_tenant_hub_confined(
             &Arc::clone(&host_activations),
             tenant_surface,
+            confinement,
         )))
     });
 
@@ -360,8 +510,12 @@ pub fn compose_host_hub(a: &SubstrateActivations) -> DynamicHub {
     crate::activations::connectome::declare_connectomes(hub)
 }
 
-/// The tenant surface — the host surface minus `TENANT_EXCLUDED_ACTIVATIONS`,
-/// and minus `claudecode` until PLX-151 wires the sandbox.
+/// The tenant surface as a **shape**, bound to no tenant.
+///
+/// This is what `TenantMount` renders as its connectome template and what
+/// PLX-127's composition tests assert on. It is *not* what a tenant dispatches
+/// into: a real tenant's hub comes from [`compose_tenant_hub_confined`], which
+/// takes the per-tenant [`Confinement`] this one has no way to know.
 ///
 /// **This function is the enforcement.** Not a filter applied to a built hub,
 /// not a deny list consulted at dispatch: the excluded activations are never
@@ -370,6 +524,29 @@ pub fn compose_host_hub(a: &SubstrateActivations) -> DynamicHub {
 /// unreachable at dispatch. `the_excluded_surface_is_absent_not_denied` asserts
 /// all four.
 pub fn compose_tenant_hub(a: &SubstrateActivations, surface: TenantSurface) -> DynamicHub {
+    compose_tenant_hub_confined(a, surface, None)
+}
+
+/// The tenant surface for **one** tenant, with `claudecode` confined to it.
+///
+/// PLX-151. The `claudecode` registered here is `a.claudecode.confined_to(c)` —
+/// the same activation and the same storage, launching inside that tenant's
+/// `plexus_sandbox::Sandbox` instead of on the host.
+///
+/// # The combination that must never reach a tenant
+///
+/// `claudecode_is_sandboxed == true` with `confinement == None` composes an
+/// **unconfined** `claudecode`. That composition exists for exactly one
+/// purpose — the connectome *template*, which is a shape and is never
+/// dispatched into — and it is unreachable as a tenant's hub, because
+/// `build_plexus_rpc_with_tenancy`'s factory has a `Confinement` for every
+/// tenant it admits and returns `None` (refusing the mount) when it does not.
+/// `a_tenant_hub_is_never_composed_with_an_unconfined_claudecode` pins that.
+pub fn compose_tenant_hub_confined(
+    a: &SubstrateActivations,
+    surface: TenantSurface,
+    confinement: Option<Confinement>,
+) -> DynamicHub {
     // EXCLUDED: `bash` (PLX-130 A1) — no `.register(Bash::new())` here.
     // EXCLUDED: `chaos` (A5) — no `#[cfg(feature = "chaos")]` arm here either,
     //           so the cargo feature cannot re-admit it into a tenant.
@@ -387,11 +564,18 @@ pub fn compose_tenant_hub(a: &SubstrateActivations, surface: TenantSurface) -> D
         .register(Interactive::new())
         .register(Solar::new());
 
-    // The one that is not excludable, because it is the product (PLX-144).
-    let hub = if surface.claudecode_is_sandboxed {
-        hub.register(a.claudecode.clone())
-    } else {
-        hub
+    // The one that is not excludable, because it is the product (PLX-144),
+    // and — since PLX-151 — the one that is confined rather than omitted.
+    let hub = match (surface.claudecode_is_sandboxed, confinement) {
+        // A real tenant: the activation, launching inside that tenant's
+        // sandbox. This is the composition a tenant actually dispatches into.
+        (true, Some(c)) => hub.register(a.claudecode.confined_to(c)),
+        // The shape, bound to no tenant: the namespace is present so the
+        // connectome template and PLX-127's `a_sandboxed_deployment_gets_
+        // claudecode_back` see what a tenant will see. Nothing dispatches here.
+        (true, None) => hub.register(a.claudecode.clone()),
+        // Not a sandboxing deployment: absent, exactly as PLX-127 shipped it.
+        (false, _) => hub,
     };
 
     crate::activations::connectome::declare_connectomes(hub)

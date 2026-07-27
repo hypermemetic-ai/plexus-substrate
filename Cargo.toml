@@ -73,6 +73,17 @@ plexus-core = { path = "../plexus-core", version = "0.6" }
 # import path, not a version.
 plexus-auth-core = { path = "../plexus-auth-core", version = "0.2" }
 plexus-transport = { path = "../plexus-transport", version = "0.4", features = ["mcp-gateway"] }
+# PLX-151: the claudecode launcher runs its CLI *inside* a confinement. The
+# crate lives outside substrate deliberately (PLX-144) so the boundary cannot be
+# reached around by substrate code, and so a second consumer gets the same one.
+plexus-sandbox = { path = "../plexus-sandbox", version = "0.1" }
+# PLX-151 c4: the SEALED proof that a tenant exists and is active. `TenantRecord`
+# cannot be fabricated — `seal` is pub(crate) to plexus-idp — so resolving one is
+# the only way to check `is_active()`, which is exactly the obligation PLX-144
+# and PLX-127 both parked on "the caller". substrate is a SIBLING of idp (both
+# above plexus-core; idp does not depend on substrate), so this is the caller
+# taking the obligation, not the dependency inversion those tickets refused.
+plexus-idp = { path = "../plexus-idp", version = "0.1" }
 # plexus-jsexec = "0.1.0"  # temporarily disabled - needs API updates
 registry = { package = "plexus-registry", path = "../plexus-registry", version = "0.2" }
 
