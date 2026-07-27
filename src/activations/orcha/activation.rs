@@ -7,7 +7,6 @@ use super::ticket_compiler;
 use super::types::{OrchaEvent, OrchaError, RunTaskRequest, CreateSessionRequest, SessionCreated, AgentMode, SessionId, SessionInfo, SessionState, GetSessionRequest, ValidationArtifact, RetryStatus, SessionRef, MonitorTreeInfo, CheckStatusRequest, StatusSummary, AgentSummary, SpawnAgentRequest, SpawnedAgent, ListAgentsRequest, GetAgentRequest, ListApprovalsRequest, ApprovalInfo, ApproveRequest, ApprovalOutcome, DenyRequest, GraphRef, NodeRef, GatherStrategy, OrchaNodeDef, OrchaEdgeDef, OrchaNodeSpec, ValidationResult, AgentInfo};
 use crate::activations::claudecode::{ClaudeCode, Model};
 use crate::activations::claudecode_loopback::ClaudeCodeLoopback;
-use crate::plexus::{HubContext, NoParent};
 use async_stream::stream;
 use futures::Stream;
 use futures::StreamExt;
@@ -27,7 +26,7 @@ type CancelRegistry = Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::watch:
 ///
 /// Provides both full orchestration (`run_task`) and coordination helpers.
 #[derive(Clone)]
-pub struct Orcha<P: HubContext = NoParent> {
+pub struct Orcha {
     storage: Arc<OrchaStorage>,
     claudecode: Arc<ClaudeCode>,
     loopback: Arc<ClaudeCodeLoopback>,
@@ -38,7 +37,7 @@ pub struct Orcha<P: HubContext = NoParent> {
     cancel_registry: CancelRegistry,
 }
 
-impl<P: HubContext> Orcha<P> {
+impl Orcha {
     /// Create a new Orcha activation
     pub fn new(
         storage: Arc<OrchaStorage>,
@@ -87,10 +86,7 @@ impl<P: HubContext> Orcha<P> {
     ///      Orcha's dispatch logic to the live event stream.
     ///
     /// This is fire-and-forget: errors are logged and skipped, never propagated.
-    pub async fn recover_running_graphs(&self)
-    where
-        P: 'static,
-    {
+    pub async fn recover_running_graphs(&self) {
         use crate::activations::lattice::NodeStatus;
         use futures::StreamExt;
 
@@ -331,7 +327,7 @@ async fn watch_single_graph(
 #[plexus_macros::activation(namespace = "orcha",
 version = "1.0.0",
 description = "Full task orchestration with approval loops and validation")]
-impl<P: HubContext> Orcha<P> {
+impl Orcha {
     /// Project management subsystem.
     #[plexus_macros::child]
     fn pm(&self) -> pm::Pm {

@@ -2,7 +2,7 @@
 //!
 //! This module is used by both the main binary and examples.
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use crate::activations::arbor::{Arbor, ArborConfig, HandleResolvers};
 use crate::activations::bash::Bash;
@@ -56,7 +56,6 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
         .expect("Failed to initialize Cone");
 
     // Initialize ClaudeCode with shared Arbor storage
-    // Use explicit type annotation for Weak<DynamicHub> parent context
     let claudecode_storage = ClaudeCodeStorage::new(
         ClaudeCodeStorageConfig::default(),
         arbor_storage,
@@ -112,7 +111,6 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
         .await
         .expect("Failed to initialize Registry");
 
-    // Use Arc::new_cyclic to get a Weak<DynamicHub> during construction.
     // PLX-111/116/117: the parent-injection ritual is gone — Arbor's handle was a
     // `plugin_id -> resolver` lookup (now wired as data below), and Cone's and
     // ClaudeCode's parent accessors had zero callers. Only Orcha still needs the
@@ -120,7 +118,7 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
     //
     // We keep a clone of `orcha` outside the closure so we can call
     // `recover_running_graphs` after the hub is fully assembled.
-    let orcha_for_recovery: std::cell::OnceCell<Orcha<Weak<DynamicHub>>> = std::cell::OnceCell::new();
+    let orcha_for_recovery: std::cell::OnceCell<Orcha> = std::cell::OnceCell::new();
 
     // PLX-117 / PLX-111: Arbor's parent handle was a `plugin_id -> resolver`
     // lookup and nothing else, so it is wired here as data, after the two
@@ -132,13 +130,15 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
             .with(Arc::new(claudecode.clone())),
     );
 
-    let hub = Arc::new_cyclic(|weak_hub: &Weak<DynamicHub>| {
-        // Inject parent context into activations that need it
-
-        // Initialize Orcha with dependencies (needs to be inside closure to access claudecode)
+    // PLX-111/115/116/117: `Arc::new_cyclic` is gone. It existed solely to hand a
+    // `Weak<DynamicHub>` to the parent-injection ritual; with Arbor's resolvers wired
+    // as data and Cone's/ClaudeCode's/Orcha's parent handles deleted, no activation
+    // takes a back-reference to the hub, so the hub is now built plainly.
+    let hub = Arc::new({
+        // Initialize Orcha with dependencies
         let graph_runtime = Arc::new(GraphRuntime::new(lattice.storage()));
         let pm = Arc::new(Pm::new(pm_storage.clone(), lattice.storage()));
-        let orcha: Orcha<Weak<DynamicHub>> = Orcha::new(
+        let orcha: Orcha = Orcha::new(
             orcha_storage.clone(),
             Arc::new(claudecode.clone()),
             loopback.clone(),
