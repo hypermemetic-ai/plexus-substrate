@@ -20,6 +20,11 @@ pub use builder::{
     build_activations, compose_host_hub, compose_tenant_hub, SubstrateActivations, TenantSurface,
     TENANT_EXCLUDED_ACTIVATIONS,
 };
+// PLX-128/PLX-129 (M4·D/M4·E) — per-tenant instances over per-tenant storage.
+pub use activations::claudecode::sessions::SessionRoot;
+pub use activations::storage::StorageScope;
+pub use builder::{build_activations_in, build_plexus_rpc_with_admission};
+pub use tenancy::{SubstrateTenantStorage, TenantStorageRoot};
 // PLX-151 (M4·H2) — the confined composition and the deployment that owns it.
 pub use builder::{build_plexus_rpc_with_tenancy, compose_tenant_hub_confined, TenantExecution};
 // PLX-151 (M4·H2) — the confinement and the admission that gates it.

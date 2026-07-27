@@ -24,6 +24,11 @@ use tracing::Instrument;
 pub struct ClaudeCode {
     pub storage: Arc<ClaudeCodeStorage>,
     executor: ClaudeCodeExecutor,
+    /// PLX-129 — the base directory `sessions_*` joins a caller-supplied
+    /// `project_path` onto, and the containment check for that join. Host
+    /// composition gets `~/.claude/projects`; a tenant gets a directory inside
+    /// its own root. See [`SessionRoot`](super::sessions::SessionRoot).
+    sessions: super::sessions::SessionRoot,
 }
 
 impl ClaudeCode {
@@ -36,14 +41,35 @@ impl ClaudeCode {
         Self {
             storage,
             executor: ClaudeCodeExecutor::new(),
+            sessions: super::sessions::SessionRoot::host_default(),
         }
     }
 
+    /// PLX-129 — bind this instance's session transcripts to `root`.
+    ///
+    /// Called by [`build_activations_in`](crate::builder::build_activations_in)
+    /// with the composition's [`StorageScope`](crate::activations::storage::StorageScope).
+    /// The default is the host's `~/.claude/projects`, which is what every
+    /// pre-M4·E caller got.
+    #[must_use]
+    pub fn with_session_root(mut self, root: super::sessions::SessionRoot) -> Self {
+        self.sessions = root;
+        self
+    }
+
+    /// The session root this instance joins `project_path` onto. Exposed so a
+    /// composition can be asserted rather than assumed.
+    #[must_use]
+    pub const fn session_root(&self) -> &super::sessions::SessionRoot {
+        &self.sessions
+    }
+
     /// Create with a custom executor
-    pub const fn with_executor_and_context(storage: Arc<ClaudeCodeStorage>, executor: ClaudeCodeExecutor) -> Self {
+    pub fn with_executor_and_context(storage: Arc<ClaudeCodeStorage>, executor: ClaudeCodeExecutor) -> Self {
         Self {
             storage,
             executor,
+            sessions: super::sessions::SessionRoot::host_default(),
         }
     }
 
@@ -60,6 +86,7 @@ impl ClaudeCode {
         Self {
             storage: Arc::clone(&self.storage),
             executor: self.executor.confined_to(confinement),
+            sessions: self.sessions.clone(),
         }
     }
 
@@ -124,7 +151,7 @@ impl ClaudeCode {
         Self::with_context_type(storage)
     }
 
-    pub const fn with_executor(storage: Arc<ClaudeCodeStorage>, executor: ClaudeCodeExecutor) -> Self {
+    pub fn with_executor(storage: Arc<ClaudeCodeStorage>, executor: ClaudeCodeExecutor) -> Self {
         Self::with_executor_and_context(storage, executor)
     }
 }
@@ -915,7 +942,7 @@ impl ClaudeCode {
         &self,
         project_path: String,
     ) -> Result<SessionsListOk, ClaudeCodeError> {
-        let sessions = sessions::list_sessions(&project_path)
+        let sessions = sessions::list_sessions(&self.sessions, &project_path)
             .await
             .map_err(ClaudeCodeError::SessionFile)?;
         Ok(SessionsListOk { sessions })
@@ -931,7 +958,7 @@ impl ClaudeCode {
         project_path: String,
         session_id: String,
     ) -> Result<SessionsGetOk, ClaudeCodeError> {
-        let events = sessions::read_session(&project_path, &session_id)
+        let events = sessions::read_session(&self.sessions, &project_path, &session_id)
             .await
             .map_err(ClaudeCodeError::SessionFile)?;
 
@@ -962,7 +989,7 @@ impl ClaudeCode {
     ) -> Result<SessionsImportOk, ClaudeCodeError> {
         let owner = owner_id.unwrap_or_else(|| "claudecode".to_string());
 
-        let tree_id = sessions::import_to_arbor(self.storage.arbor(), &project_path, &session_id, &owner)
+        let tree_id = sessions::import_to_arbor(self.storage.arbor(), &self.sessions, &project_path, &session_id, &owner)
             .await
             .map_err(ClaudeCodeError::SessionFile)?;
 
@@ -984,7 +1011,7 @@ impl ClaudeCode {
         project_path: String,
         session_id: String,
     ) -> Result<SessionsExportOk, ClaudeCodeError> {
-        sessions::export_from_arbor(self.storage.arbor(), &tree_id, &project_path, &session_id)
+        sessions::export_from_arbor(self.storage.arbor(), &self.sessions, &tree_id, &project_path, &session_id)
             .await
             .map_err(ClaudeCodeError::SessionFile)?;
 
@@ -1004,7 +1031,7 @@ impl ClaudeCode {
         project_path: String,
         session_id: String,
     ) -> Result<SessionsDeleteOk, ClaudeCodeError> {
-        sessions::delete_session(&project_path, &session_id)
+        sessions::delete_session(&self.sessions, &project_path, &session_id)
             .await
             .map_err(ClaudeCodeError::SessionFile)?;
 

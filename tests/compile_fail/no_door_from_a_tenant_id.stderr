@@ -1,0 +1,49 @@
+error[E0599]: no function or associated item named `for_tenant_id` found for struct `StorageScope` in the current scope
+  --> tests/compile_fail/no_door_from_a_tenant_id.rs:13:27
+   |
+13 |     let _ = StorageScope::for_tenant_id(&id);
+   |                           ^^^^^^^^^^^^^ function or associated item not found in `StorageScope`
+   |
+note: if you're trying to build a new `StorageScope` consider using one of the following associated functions:
+      StorageScope::host
+      StorageScope::for_tenant
+  --> src/activations/storage.rs
+   |
+   |     pub fn host() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^
+...
+   |     pub fn for_tenant(root: &TenantStorageRoot) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `for_tenant` with a similar name
+   |
+13 -     let _ = StorageScope::for_tenant_id(&id);
+13 +     let _ = StorageScope::for_tenant(&id);
+   |
+
+error[E0308]: mismatched types
+  --> tests/compile_fail/no_door_from_a_tenant_id.rs:16:38
+   |
+16 |     let _ = StorageScope::for_tenant(&id);
+   |             ------------------------ ^^^ expected `&TenantStorageRoot`, found `&TenantId`
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected reference `&TenantStorageRoot`
+              found reference `&TenantId`
+note: associated function defined here
+  --> src/activations/storage.rs
+   |
+   |     pub fn for_tenant(root: &TenantStorageRoot) -> Self {
+   |            ^^^^^^^^^^
+
+error[E0599]: no function or associated item named `new` found for struct `TenantStorageRoot` in the current scope
+  --> tests/compile_fail/no_door_from_a_tenant_id.rs:19:32
+   |
+19 |     let _ = TenantStorageRoot::new(&id, "/tmp");
+   |                                ^^^ function or associated item not found in `TenantStorageRoot`
+   |
+help: there is a method `ne` with a similar name, but with different arguments
+  --> $RUST/core/src/cmp.rs
+   |
+   |     fn ne(&self, other: &Rhs) -> bool {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

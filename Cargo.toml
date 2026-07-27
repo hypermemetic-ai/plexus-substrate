@@ -108,6 +108,8 @@ reqwest = { version = "0.11", features = ["json"] }
 jsonrpsee = { version = "0.26", features = ["client", "ws-client"] }
 tokio-tungstenite = "0.21"
 tempfile = "3"
+# PLX-129 c3: the sealed wrapper is proved by a program that must NOT compile.
+trybuild = "1"
 
 [[example]]
 name = "rmcp_mcp_server"

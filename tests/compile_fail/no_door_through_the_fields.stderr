@@ -1,0 +1,11 @@
+error[E0451]: fields `tenant`, `storage` and `activations` of struct `TenantStorageRoot` are private
+  --> tests/compile_fail/no_door_through_the_fields.rs:14:9
+   |
+13 |     let _ = TenantStorageRoot {
+   |             ----------------- in this type
+14 |         tenant: id,
+   |         ^^^^^^ private field
+15 |         storage: canon.clone(),
+   |         ^^^^^^^ private field
+16 |         activations: canon,
+   |         ^^^^^^^^^^^ private field
