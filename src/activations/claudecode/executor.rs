@@ -410,7 +410,10 @@ impl ClaudeCodeExecutor {
                 .stderr(Stdio::piped())
                 .stdin(Stdio::null())
                 // Unset CLAUDECODE so nested Claude sessions are allowed
-                .env_remove("CLAUDECODE");
+                .env_remove("CLAUDECODE")
+                // TETHER-7: a dropped chat stream ends its Claude Code (bash
+                // execs the one command, so this is `claude` itself).
+                .kill_on_drop(true);
 
             // Set loopback session ID env var if loopback is enabled
             if loopback_enabled {

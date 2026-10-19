@@ -65,6 +65,9 @@ cllient = "0.2.1"
 # same graph menger resolves, one of each.
 plexus-macros = { path = "../plexus-macros", version = "0.6" }
 plexus-core = { path = "../plexus-core", version = "0.6" }
+# TETHER-7: claudecode's emitted client (`ClaudeCodeClient<T>`), so a program
+# that imports substrate calls it with substrate's own client.
+plexus-client = { path = "../plexus-macros/plexus-client", version = "0.6" }
 plexus-transport = { path = "../plexus-transport", version = "0.5", features = ["mcp-gateway"] }
 plexus-auth-core = { path = "../plexus-auth-core", version = "0.2", features = ["adapters"] }
 # PLEXUS-6: login as menger takes it — the providers' adapters (`key` for
