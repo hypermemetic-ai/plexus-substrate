@@ -8,7 +8,7 @@ use crate::activations::arbor::{Arbor, ArborConfig};
 use crate::activations::bash::Bash;
 #[cfg(feature = "chaos")]
 use crate::activations::chaos::Chaos;
-use crate::activations::claudecode::{ClaudeCode, ClaudeCodeStorage, ClaudeCodeStorageConfig};
+use crate::activations::claudecode::{ClaudeCode, ClaudeCodeExecutor, ClaudeCodeStorage, ClaudeCodeStorageConfig};
 use crate::activations::claudecode_loopback::{ClaudeCodeLoopback, LoopbackStorageConfig};
 use crate::activations::cone::{Cone, ConeStorageConfig};
 use crate::activations::echo::Echo;
@@ -20,9 +20,9 @@ use crate::activations::mustache::{Mustache, MustacheStorageConfig};
 use crate::activations::orcha::pm::{Pm, PmStorage, PmStorageConfig};
 use crate::activations::orcha::{GraphRuntime, Orcha, OrchaStorage, OrchaStorageConfig};
 use crate::activations::solar::Solar;
-use crate::plexus::DynamicHub;
+use crate::plexus::{AuthSetup, DynamicHub};
 // use plexus_jsexec::{JsExec, JsExecConfig};  // temporarily disabled - needs API updates
-use registry::Registry;
+use crate::activations::registry::Registry;
 
 /// Build the Plexus RPC hub with registered activations
 ///
@@ -42,6 +42,25 @@ use registry::Registry;
 /// This function is async because Arbor, Cone, and `ClaudeCode` require
 /// async database initialization.
 pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
+    build_plexus_rpc_with(BuildOptions::default()).await
+}
+
+/// PLEXUS-6: what a hub is built with beyond the defaults.
+#[derive(Default)]
+pub struct BuildOptions {
+    /// The protocol's auth — the `auth` activation and the gate every call
+    /// goes through ([`DynamicHub::with_auth`]). `None`: a hub without a
+    /// gate, for in-process use and tests only; the binary always gives one
+    /// (there is no open mode).
+    pub auth: Option<AuthSetup>,
+    /// The Claude Code binary `claudecode` runs (default: found on this
+    /// machine). Tests point it at a stub.
+    pub claude_path: Option<String>,
+}
+
+/// [`build_plexus_rpc`] with [`BuildOptions`].
+pub async fn build_plexus_rpc_with(opts: BuildOptions) -> Arc<DynamicHub> {
+    let BuildOptions { auth, claude_path } = opts;
     // Initialize Arbor first (other activations depend on its storage)
     // Use explicit type annotation for Weak<DynamicHub> parent context
     let arbor: Arbor<Weak<DynamicHub>> = Arbor::with_context_type(ArborConfig::default())
@@ -63,7 +82,12 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
     )
     .await
     .expect("Failed to initialize ClaudeCode storage");
-    let claudecode: ClaudeCode<Weak<DynamicHub>> = ClaudeCode::with_context_type(Arc::new(claudecode_storage));
+    let claudecode: ClaudeCode<Weak<DynamicHub>> = match claude_path {
+        Some(path) => ClaudeCode::with_executor_and_context(Arc::new(claudecode_storage), ClaudeCodeExecutor::with_path(path)),
+        None => ClaudeCode::with_context_type(Arc::new(claudecode_storage)),
+    };
+    // PLEXUS-6: the clone kept to hand the gate once the hub is built.
+    let claudecode_for_gate = claudecode.clone();
 
     // Initialize Mustache for template rendering
     let mustache = Mustache::new(MustacheStorageConfig::default())
@@ -151,7 +175,7 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
         #[cfg(feature = "chaos")]
         let hub = hub.register(Chaos::new(lattice.storage()));
 
-        hub.register(arbor)
+        let hub = hub.register(arbor)
             .register(cone)
             .register(claudecode)
             .register(mustache)
@@ -162,8 +186,21 @@ pub async fn build_plexus_rpc() -> Arc<DynamicHub> {
             .register(registry)
             .register(lattice)
             .register(Interactive::new())  // Bidirectional demo activation
-            .register(Solar::new())
+            .register(Solar::new());
+
+        // PLEXUS-6: login — the auth activation, and every call through the
+        // gate built from the same stores. After every activation, so the
+        // gate knows each method.
+        match auth {
+            Some(setup) => hub.with_auth(setup),
+            None => hub,
+        }
     });
+
+    // PLEXUS-6: claudecode asks the gate whether a caller is an admin.
+    if let Some(gate) = hub.gate() {
+        claudecode_for_gate.set_gate(gate.clone());
+    }
 
     // Run changelog startup check
     let plexus_hash = hub.compute_hash();

@@ -21,7 +21,7 @@ Denials, timeouts (default 5 minutes), and creation failures return
 approvers: it blocks until a new approval arrives for that session (using a
 per-session `tokio::sync::Notify`) so the approver does not have to poll.
 `configure(session_id)` generates the MCP config block to hand to
-`claudecode.create(loopback_session_id=…)`.
+`claudecode.create(None, loopback_session_id=…)`.
 
 ## Namespace
 

@@ -6,7 +6,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use activation::{Cone, ConeActivation, ConeActivationMethod, ConeMethod};
+pub use activation::{Cone, ConeChild, ConeChildMethod, ConeMethod};
 pub use methods::ConeIdentifier;
 pub use storage::{ConeStorage, ConeStorageConfig};
 pub use types::{

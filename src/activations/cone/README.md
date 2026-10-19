@@ -23,7 +23,7 @@ conversation can be rendered with content inlined when viewed.
 
 Sessions can be addressed either flatly (`cone.chat(identifier=…)`) or
 through the dynamic child gate `cone.of(<id-or-name>).chat(…)` — see
-`ConeActivation` below.
+`ConeChild` below.
 
 ## Namespace
 
@@ -46,9 +46,9 @@ through the dynamic child gate `cone.of(<id-or-name>).chat(…)` — see
 
 | Child | Kind | list method | search method | Description |
 |---|---|---|---|---|
-| `of` | dynamic | `cone_ids` | `of` | Look up a cone by name or UUID and return a `ConeActivation` — a typed per-cone namespace. Introduced in IR-19. |
+| `of` | dynamic | `cone_ids` | `of` | Look up a cone by name or UUID and return a `ConeChild` — a typed per-cone namespace. Introduced in IR-19. |
 
-## Methods (ConeActivation — per-cone)
+## Methods (ConeChild — per-cone)
 
 Exposed via `cone.of(<id>).<method>`:
 
@@ -102,7 +102,7 @@ synapse --port 44104 lforge substrate cone.of asst.chat '{"prompt":"hello"}'
 
 ## Source
 
-- `activation.rs` — flat `Cone<P>` + per-cone `ConeActivation` RPC surfaces,
+- `activation.rs` — flat `Cone<P>` + per-cone `ConeChild` RPC surfaces,
   handle resolution, context assembly
 - `methods.rs` — `ConeIdentifier` (by id / by name)
 - `storage.rs` — SQLite persistence + `ConeStorageConfig`

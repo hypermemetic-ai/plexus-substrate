@@ -219,7 +219,10 @@ impl Activation for Health {
                 .with_returns(schemars::schema_for!(SchemaResult)),
         ];
 
-        PluginSchema::leaf(self.namespace(), self.version(), self.description(), methods)
+        let mut schema = PluginSchema::leaf(self.namespace(), self.version(), self.description(), methods);
+        // PLEXUS-6: under login a viewer may ask whether the hub is up.
+        schema.roles.insert("viewer".into(), vec!["health.check".into(), "health.schema".into()]);
+        schema
     }
 }
 

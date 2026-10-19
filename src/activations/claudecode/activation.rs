@@ -1,3 +1,7 @@
+// PLEXUS-6: the 0.6 macros' legacy form (MACRO-13) — these activations keep
+// `namespace = …` and their own type names; the name rule's trait would need
+// one event type per activation. Its deprecation note is allowed here.
+#![allow(deprecated)]
 use super::{
     executor::{ClaudeCodeExecutor, LaunchConfig},
     sessions,
@@ -5,7 +9,7 @@ use super::{
     types::{ResolveResult, NodeEvent, ClaudeCodeConfig, ChatEvent, MessageRole, Position, RawClaudeEvent, StreamEventInner, StreamDelta, StreamContentBlock, RawContentBlock, ChatUsage, Model, CreateResult, ClaudeCodeError, GetResult, ListResult, DeleteResult, ForkResult, ChatStartResult, StreamId, PollResult, ClaudeCodeId, StreamListResult, GetTreeResult, RenderResult, SessionsListResult, SessionsGetResult, SessionsImportResult, SessionsExportResult, SessionsDeleteResult, StreamStatus},
 };
 use crate::activations::arbor::{NodeId, TreeId};
-use crate::plexus::{HubContext, NoParent};
+use crate::plexus::{AuthContext, Gate, Grant, HubContext, NoParent};
 use async_stream::stream;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
@@ -25,7 +29,45 @@ pub struct ClaudeCode<P: HubContext = NoParent> {
     executor: ClaudeCodeExecutor,
     /// Hub reference for resolving foreign handles when walking arbor trees
     hub: Arc<OnceLock<P>>,
+    /// PLEXUS-6: the hub's gate, once the hub is built behind one — asked
+    /// whether a caller is an admin (holds [`ANY_SESSION`]).
+    gate: Arc<OnceLock<Arc<Gate>>>,
     _phantom: PhantomData<P>,
+}
+
+/// PLEXUS-6: the grant that reaches every session, whoever created it. No
+/// role lists it, so only `admin` (which holds every grant) holds it.
+pub const ANY_SESSION: &str = "claudecode.any_session";
+
+/// PLEXUS-6: who is asking, as a session's ownership sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Caller {
+    /// In process (no auth context: orcha, a hub without a gate) — every
+    /// session; what it creates belongs to no one (an admin's to reach).
+    System,
+    /// An admin (holds [`ANY_SESSION`]): every session; what it creates is
+    /// its own.
+    Admin(String),
+    /// Anyone else: only the sessions it created.
+    Principal(String),
+}
+
+impl Caller {
+    /// The owner a lookup is held to (`None`: every session).
+    fn scope(&self) -> Option<String> {
+        match self {
+            Self::Principal(p) => Some(p.clone()),
+            Self::System | Self::Admin(_) => None,
+        }
+    }
+
+    /// Who a session it creates belongs to.
+    fn owner(&self) -> Option<String> {
+        match self {
+            Self::System => None,
+            Self::Admin(p) | Self::Principal(p) => Some(p.clone()),
+        }
+    }
 }
 
 impl<P: HubContext> ClaudeCode<P> {
@@ -35,6 +77,7 @@ impl<P: HubContext> ClaudeCode<P> {
             storage,
             executor: ClaudeCodeExecutor::new(),
             hub: Arc::new(OnceLock::new()),
+            gate: Arc::new(OnceLock::new()),
             _phantom: PhantomData,
         }
     }
@@ -45,6 +88,7 @@ impl<P: HubContext> ClaudeCode<P> {
             storage,
             executor,
             hub: Arc::new(OnceLock::new()),
+            gate: Arc::new(OnceLock::new()),
             _phantom: PhantomData,
         }
     }
@@ -55,6 +99,35 @@ impl<P: HubContext> ClaudeCode<P> {
     /// This allows `ClaudeCode` to resolve handles from other activations when walking arbor trees.
     pub fn inject_parent(&self, parent: P) {
         let _ = self.hub.set(parent);
+    }
+
+    /// PLEXUS-6: the hub's gate, after the hub is built behind one; every
+    /// clone shares it. The first call wins.
+    pub fn set_gate(&self, gate: Arc<Gate>) {
+        let _ = self.gate.set(gate);
+    }
+
+    /// PLEXUS-6: the caller of a wire call (`auth`), or in process (`None`).
+    /// A context that is not signed in owns nothing and is shown nothing.
+    fn caller(&self, auth: Option<&AuthContext>) -> Caller {
+        let Some(ctx) = auth else { return Caller::System };
+        if !ctx.is_authenticated() {
+            return Caller::Principal(String::new());
+        }
+        let principal = ctx.principal().map_or_else(|| ctx.user_id.clone(), |p| p.to_string());
+        let admin = self.gate.get().is_some_and(|g| g.check(Some(ctx), &Grant::new(ANY_SESSION), None).is_ok());
+        if admin { Caller::Admin(principal) } else { Caller::Principal(principal) }
+    }
+
+    /// PLEXUS-6: whether `caller` reaches the session `session_id` — its
+    /// owner, an admin, or in process. A session that is not the caller's
+    /// answers as one that does not exist.
+    async fn reaches(&self, caller: &Caller, session_id: &ClaudeCodeId) -> Result<(), ClaudeCodeError> {
+        let Some(me) = caller.scope() else { return Ok(()) };
+        match self.storage.session_owner(session_id).await? {
+            Some(owner) if owner == me => Ok(()),
+            _ => Err(ClaudeCodeError::SessionNotFound { identifier: session_id.to_string() }),
+        }
     }
 
     /// Check if parent context has been injected
@@ -156,7 +229,7 @@ async fn create_event_node(
 // advancing the session head.
 //
 // Flat `ClaudeCode::chat(name, ...)` resolves by name and delegates here.
-// The new per-session `SessionActivation::chat(prompt, ...)` (IR-18) takes
+// The new per-session `SessionChild::chat(prompt, ...)` (IR-18) takes
 // its pre-resolved `ClaudeCodeConfig` and delegates here as well. This keeps
 // the two entry points behaviorally identical without copy-paste.
 // ═══════════════════════════════════════════════════════════════════════════
@@ -580,10 +653,19 @@ fn chat_stream_for_config(
     }
 }
 
+// PLEXUS-6: each method its own grant. A viewer reads its own sessions, an
+// editor creates and drives them (a session is its creator's: the methods
+// below hold every lookup to it, an admin reaching all). Unlisted — the
+// sessions_* methods over this machine's Claude Code files, and a session's
+// dynamic child path — only admin holds.
 #[plexus_macros::activation(namespace = "claudecode",
 version = "1.0.0",
 description = "Manage Claude Code sessions with Arbor-backed conversation history",
-resolve_handle)]
+resolve_handle,
+roles(
+    viewer = ["get", "list", "poll", "streams", "get_tree", "render_context"],
+    editor = [viewer, "create", "chat", "chat_async", "fork", "delete"]
+))]
 impl<P: HubContext> ClaudeCode<P> {
     /// Create a new Claude Code session
     #[plexus_macros::method(params(
@@ -596,6 +678,7 @@ impl<P: HubContext> ClaudeCode<P> {
     ))]
     pub async fn create(
         &self,
+        auth: Option<&AuthContext>,
         name: String,
         working_dir: String,
         model: Model,
@@ -605,8 +688,15 @@ impl<P: HubContext> ClaudeCode<P> {
     ) -> impl Stream<Item = CreateResult> + Send + 'static {
         let storage = self.storage.clone();
         let loopback = loopback_enabled.unwrap_or(false);
+        let owner = self.caller(auth).owner();
 
         stream! {
+            // PLEXUS-6: a session belongs to a signed-in principal.
+            if owner.as_deref() == Some("") {
+                yield CreateResult::Err { message: "sign in first: a session belongs to the principal that creates it".into() };
+                return;
+            }
+
             // Resolve relative paths to absolute before storing
             let working_dir = match std::fs::canonicalize(&working_dir) {
                 Ok(p) => p.to_string_lossy().into_owned(),
@@ -634,6 +724,13 @@ impl<P: HubContext> ClaudeCode<P> {
             // claude_session_id is None initially; populated after first chat with real Claude UUID
             match storage.session_create(name, working_dir, model, system_prompt, None, loopback, None, loopback_session_id, None).await {
                 Ok(config) => {
+                    if let Some(owner) = &owner {
+                        if let Err(e) = storage.session_set_owner(&config.id, owner).await {
+                            // Unowned, it is an admin's alone: say so rather than hand it over.
+                            yield CreateResult::Err { message: e.to_string() };
+                            return;
+                        }
+                    }
                     yield CreateResult::Ok {
                         id: config.id,
                         head: config.head,
@@ -656,6 +753,7 @@ impl<P: HubContext> ClaudeCode<P> {
     ))]
     pub async fn chat(
         &self,
+        auth: Option<&AuthContext>,
         name: String,
         prompt: String,
         ephemeral: Option<bool>,
@@ -665,7 +763,8 @@ impl<P: HubContext> ClaudeCode<P> {
         let executor = self.executor.clone();
 
         // Resolve by name before entering the stream (matches pre-IR-18 semantics).
-        let resolve_result = storage.session_get_by_name(&name).await;
+        // PLEXUS-6: among the caller's own sessions.
+        let resolve_result = storage.session_get_by_name_owned_by(&name, self.caller(auth).scope().as_deref()).await;
 
         stream! {
             let config = match resolve_result {
@@ -693,8 +792,8 @@ impl<P: HubContext> ClaudeCode<P> {
 
     /// Get session configuration details
     #[plexus_macros::method]
-    async fn get(&self, name: String) -> impl Stream<Item = GetResult> + Send + 'static {
-        let result = self.storage.session_get_by_name(&name).await;
+    async fn get(&self, auth: Option<&AuthContext>, name: String) -> impl Stream<Item = GetResult> + Send + 'static {
+        let result = self.storage.session_get_by_name_owned_by(&name, self.caller(auth).scope().as_deref()).await;
 
         stream! {
             match result {
@@ -710,11 +809,12 @@ impl<P: HubContext> ClaudeCode<P> {
 
     /// List all Claude Code sessions
     #[plexus_macros::method]
-    async fn list(&self) -> impl Stream<Item = ListResult> + Send + 'static {
+    async fn list(&self, auth: Option<&AuthContext>) -> impl Stream<Item = ListResult> + Send + 'static {
         let storage = self.storage.clone();
+        let scope = self.caller(auth).scope();
 
         stream! {
-            match storage.session_list().await {
+            match storage.session_list_owned_by(scope.as_deref()).await {
                 Ok(sessions) => {
                     yield ListResult::Ok { sessions };
                 }
@@ -727,9 +827,9 @@ impl<P: HubContext> ClaudeCode<P> {
 
     /// Delete a session
     #[plexus_macros::method]
-    async fn delete(&self, name: String) -> impl Stream<Item = DeleteResult> + Send + 'static {
+    async fn delete(&self, auth: Option<&AuthContext>, name: String) -> impl Stream<Item = DeleteResult> + Send + 'static {
         let storage = self.storage.clone();
-        let resolve_result = storage.session_get_by_name(&name).await;
+        let resolve_result = storage.session_get_by_name_owned_by(&name, self.caller(auth).scope().as_deref()).await;
 
         stream! {
             let config = match resolve_result {
@@ -755,11 +855,14 @@ impl<P: HubContext> ClaudeCode<P> {
     #[plexus_macros::method]
     async fn fork(
         &self,
+        auth: Option<&AuthContext>,
         name: String,
         new_name: String,
     ) -> impl Stream<Item = ForkResult> + Send + 'static {
         let storage = self.storage.clone();
-        let resolve_result = storage.session_get_by_name(&name).await;
+        let caller = self.caller(auth);
+        let resolve_result = storage.session_get_by_name_owned_by(&name, caller.scope().as_deref()).await;
+        let owner = caller.owner();
 
         stream! {
             // Get parent session
@@ -785,6 +888,13 @@ impl<P: HubContext> ClaudeCode<P> {
                 None, // metadata
             ).await {
                 Ok(mut c) => {
+                    // PLEXUS-6: the fork is the caller's.
+                    if let Some(owner) = &owner {
+                        if let Err(e) = storage.session_set_owner(&c.id, owner).await {
+                            yield ForkResult::Err { message: e.to_string() };
+                            return;
+                        }
+                    }
                     // Update head to parent's position (share the same tree point)
                     // This creates a branch - the new session diverges from here
                     if let Err(e) = storage.session_update_head(&c.id, parent.head.node_id, None).await {
@@ -818,6 +928,7 @@ impl<P: HubContext> ClaudeCode<P> {
     ))]
     async fn chat_async(
         &self,
+        auth: Option<&AuthContext>,
         name: String,
         prompt: String,
         ephemeral: Option<bool>,
@@ -825,8 +936,8 @@ impl<P: HubContext> ClaudeCode<P> {
         let storage = self.storage.clone();
         let executor = self.executor.clone();
 
-        // Resolve session before entering stream
-        let resolve_result = storage.session_get_by_name(&name).await;
+        // Resolve session before entering stream (PLEXUS-6: among the caller's own)
+        let resolve_result = storage.session_get_by_name_owned_by(&name, self.caller(auth).scope().as_deref()).await;
 
         stream! {
             let is_ephemeral = ephemeral.unwrap_or(false);
@@ -888,13 +999,25 @@ impl<P: HubContext> ClaudeCode<P> {
     ))]
     async fn poll(
         &self,
+        auth: Option<&AuthContext>,
         stream_id: StreamId,
         from_seq: Option<u64>,
         limit: Option<u64>,
     ) -> impl Stream<Item = PollResult> + Send + 'static {
         let storage = self.storage.clone();
+        // PLEXUS-6: a stream is its session's; another's is not found.
+        let caller = self.caller(auth);
+        let reached = match storage.stream_get_info(&stream_id).await {
+            Ok(info) => self.reaches(&caller, &info.session_id).await
+                .map_err(|_| ClaudeCodeError::SessionNotFound { identifier: format!("stream:{stream_id}") }),
+            Err(e) => Err(e),
+        };
 
         stream! {
+            if let Err(e) = reached {
+                yield PollResult::Err { message: e.to_string() };
+                return;
+            }
             let limit_usize = limit.map(|l| l as usize);
 
             match storage.stream_poll(&stream_id, from_seq, limit_usize).await {
@@ -923,17 +1046,25 @@ impl<P: HubContext> ClaudeCode<P> {
     ))]
     async fn streams(
         &self,
+        auth: Option<&AuthContext>,
         session_id: Option<ClaudeCodeId>,
     ) -> impl Stream<Item = StreamListResult> + Send + 'static {
         let storage = self.storage.clone();
+        let caller = self.caller(auth);
+        let all = if let Some(sid) = session_id {
+            storage.stream_list_for_session(&sid).await
+        } else {
+            storage.stream_list().await
+        };
+        // PLEXUS-6: only the streams of the caller's own sessions.
+        let mut streams = Vec::with_capacity(all.len());
+        for s in all {
+            if self.reaches(&caller, &s.session_id).await.is_ok() {
+                streams.push(s);
+            }
+        }
 
         stream! {
-            let streams = if let Some(sid) = session_id {
-                storage.stream_list_for_session(&sid).await
-            } else {
-                storage.stream_list().await
-            };
-
             yield StreamListResult::Ok { streams };
         }
     }
@@ -944,12 +1075,14 @@ impl<P: HubContext> ClaudeCode<P> {
     ))]
     async fn get_tree(
         &self,
+        auth: Option<&AuthContext>,
         name: String,
     ) -> impl Stream<Item = GetTreeResult> + Send + 'static {
         let storage = self.storage.clone();
+        let scope = self.caller(auth).scope();
 
         stream! {
-            let config = match storage.session_get_by_name(&name).await {
+            let config = match storage.session_get_by_name_owned_by(&name, scope.as_deref()).await {
                 Ok(c) => c,
                 Err(e) => {
                     yield GetTreeResult::Err { message: e.to_string() };
@@ -972,15 +1105,17 @@ impl<P: HubContext> ClaudeCode<P> {
     ))]
     async fn render_context(
         &self,
+        auth: Option<&AuthContext>,
         name: String,
         start: Option<NodeId>,
         end: Option<NodeId>,
     ) -> impl Stream<Item = RenderResult> + Send + 'static {
         let storage = self.storage.clone();
+        let scope = self.caller(auth).scope();
 
         stream! {
-            // Get session config
-            let config = match storage.session_get_by_name(&name).await {
+            // Get session config (PLEXUS-6: among the caller's own)
+            let config = match storage.session_get_by_name_owned_by(&name, scope.as_deref()).await {
                 Ok(c) => c,
                 Err(e) => {
                     yield RenderResult::Err { message: e.to_string() };
@@ -1158,22 +1293,22 @@ impl<P: HubContext> ClaudeCode<P> {
     // Dynamic child gate — sessions as typed sub-namespaces (IR-18).
     //
     // `claudecode.session <id>.chat(…)` now resolves through the
-    // macro-generated `ChildRouter` to a `SessionActivation`. Flat methods
+    // macro-generated `ChildRouter` to a `SessionChild`. Flat methods
     // (`chat`, `list`, `delete`, `fork`, etc.) remain unchanged — this gate
     // is purely additive.
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Look up a session by its ID and return a typed per-session namespace.
     ///
-    /// The returned `SessionActivation` exposes per-session methods
+    /// The returned `SessionChild` exposes per-session methods
     /// (`chat`, `get`, `delete`) under the `session` namespace. Resolution
     /// fails with `None` if the ID doesn't parse as a UUID or no session
     /// with that ID exists.
     #[plexus_macros::child(list = "session_ids")]
-    async fn session(&self, id: &str) -> Option<SessionActivation> {
+    async fn session(&self, id: &str) -> Option<SessionChild> {
         let session_id = ClaudeCodeId::parse_str(id).ok()?;
         match self.storage.session_exists(&session_id).await {
-            Ok(true) => Some(SessionActivation::new(
+            Ok(true) => Some(SessionChild::new(
                 session_id,
                 self.storage.clone(),
                 self.executor.clone(),
@@ -1695,7 +1830,7 @@ impl<P: HubContext> ClaudeCode<P> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SessionActivation — typed per-session namespace (IR-18)
+// SessionChild — typed per-session namespace (IR-18)
 //
 // Acts as the child activation returned by `ClaudeCode::session(id)`. Methods
 // here delegate to the same storage / executor as the flat `ClaudeCode`
@@ -1709,14 +1844,14 @@ impl<P: HubContext> ClaudeCode<P> {
 /// only per-turn data (prompt, ephemeral flag, etc.). Cheap to clone — all
 /// state is `Arc`/cheap-copy.
 #[derive(Clone)]
-pub struct SessionActivation {
+pub struct SessionChild {
     session_id: ClaudeCodeId,
     storage: Arc<ClaudeCodeStorage>,
     executor: ClaudeCodeExecutor,
 }
 
-impl SessionActivation {
-    /// Construct a new `SessionActivation` bound to `session_id`.
+impl SessionChild {
+    /// Construct a new `SessionChild` bound to `session_id`.
     ///
     /// Constructed by `ClaudeCode::session(id)` after confirming the session
     /// exists; callers outside the child gate should prefer that path so
@@ -1732,9 +1867,9 @@ impl SessionActivation {
     /// The session this activation is bound to.
     ///
     /// Public accessor for `HandleEnum` integration — see IR-18. Mirrors the
-    /// cone precedent (`ConeActivation::cone_id`), which is reachable via
+    /// cone precedent (`ConeChild::cone_id`), which is reachable via
     /// `pub use` re-export on `activations::cone`. SUB-CLEAN-2 re-exported
-    /// `SessionActivation` for parity, so this accessor is now reachable
+    /// `SessionChild` for parity, so this accessor is now reachable
     /// from the public API.
     pub const fn session_id(&self) -> ClaudeCodeId {
         self.session_id
@@ -1746,7 +1881,7 @@ impl SessionActivation {
     version = "1.0.0",
     description = "Per-session typed namespace for a claudecode session"
 )]
-impl SessionActivation {
+impl SessionChild {
     /// Send a prompt to this session.
     ///
     /// Mirrors `ClaudeCode::chat(name, prompt, …)` but pins the session by
@@ -1812,7 +1947,7 @@ impl SessionActivation {
     /// Delete this session.
     ///
     /// Note: session deletion is a lifecycle operation; after this call
-    /// further method invocations on the same `SessionActivation` will
+    /// further method invocations on the same `SessionChild` will
     /// return `SessionNotFound`-style errors.
     #[plexus_macros::method]
     pub(super) async fn delete(&self) -> impl Stream<Item = DeleteResult> + Send + 'static {
@@ -1922,7 +2057,7 @@ mod ir18_tests {
         let child = claudecode.get_child(&config.id.to_string()).await;
         assert!(
             child.is_some(),
-            "get_child(<valid session id>) must return Some(SessionActivation)"
+            "get_child(<valid session id>) must return Some(SessionChild)"
         );
     }
 

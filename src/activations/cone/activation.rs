@@ -1,3 +1,7 @@
+// PLEXUS-6: the 0.6 macros' legacy form (MACRO-13) — these activations keep
+// `namespace = …` and their own type names; the name rule's trait would need
+// one event type per activation. Its deprecation note is allowed here.
+#![allow(deprecated)]
 use super::methods::ConeIdentifier;
 use super::storage::{ConeStorage, ConeStorageConfig};
 use super::types::{
@@ -624,13 +628,13 @@ impl<P: HubContext> Cone<P> {
     ///
     /// Enables the nested-namespace syntax: `cone.of abc123.chat "…"` routes
     /// through this gate, then dispatches `chat` on the returned
-    /// [`ConeActivation`]. Flat methods on `Cone` remain the primary API;
+    /// [`ConeChild`]. Flat methods on `Cone` remain the primary API;
     /// this gate is additive (IR-19).
     ///
     /// The sibling `cone_ids` method supplies completions for
     /// `ChildRouter::list_children`.
     #[plexus_macros::child(list = "cone_ids")]
-    async fn of(&self, id: &str) -> Option<ConeActivation> {
+    async fn of(&self, id: &str) -> Option<ConeChild> {
         // Accept either UUID or (partial) name — mirrors the flat methods'
         // `ConeIdentifier` resolution so the child gate is as forgiving as
         // `cone.chat(identifier=..)`.
@@ -648,10 +652,10 @@ impl<P: HubContext> Cone<P> {
         // `resolve_cone_identifier` accepts any syntactically valid UUID in
         // the `ById` branch without consulting the DB; probe `cone_get` here
         // so `get_child("<unknown-uuid>")` returns `None` rather than a
-        // `ConeActivation` bound to a nonexistent cone.
+        // `ConeChild` bound to a nonexistent cone.
         self.storage.cone_get(&cone_id).await.ok()?;
 
-        Some(ConeActivation::new(
+        Some(ConeChild::new(
             cone_id,
             self.storage.clone(),
             self.llm_registry.clone(),
@@ -680,7 +684,7 @@ impl<P: HubContext> Cone<P> {
 }
 
 // ============================================================================
-// ConeActivation — per-cone typed namespace (IR-19)
+// ConeChild — per-cone typed namespace (IR-19)
 // ============================================================================
 
 /// Per-cone typed activation exposed through `Cone::of(id)`.
@@ -688,16 +692,16 @@ impl<P: HubContext> Cone<P> {
 /// Wraps a single cone's identity + shared storage/LLM-registry handles so
 /// nested calls like `cone.of {id}.chat(...)` can dispatch without re-passing
 /// the cone identifier. The flat methods on [`Cone`] remain the source of
-/// truth for creation/listing/deletion-at-root; `ConeActivation` is an
+/// truth for creation/listing/deletion-at-root; `ConeChild` is an
 /// additive, per-instance view (IR-19).
 #[derive(Clone)]
-pub struct ConeActivation {
+pub struct ConeChild {
     cone_id: ConeId,
     storage: Arc<ConeStorage>,
     llm_registry: Arc<ModelRegistry>,
 }
 
-impl ConeActivation {
+impl ConeChild {
     /// Construct a new per-cone activation.
     ///
     /// Callers should only produce this through [`Cone::of`], which performs
@@ -722,7 +726,7 @@ impl ConeActivation {
 
 #[plexus_macros::activation(namespace = "cone", version = "1.0.0",
     description = "Typed view of a single cone — IR-19 dynamic child gate")]
-impl ConeActivation {
+impl ConeChild {
     /// Return this cone's configuration.
     #[plexus_macros::method]
     async fn get(&self) -> impl Stream<Item = GetResult> + Send + 'static {

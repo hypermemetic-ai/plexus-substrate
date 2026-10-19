@@ -138,6 +138,12 @@ impl ClaudeCodeStorage {
         .execute(&self.pool)
         .await;
 
+        // PLEXUS-6: the principal that created a session. NULL for a session
+        // made in process (orcha) or before login: only an admin reaches it.
+        let _ = sqlx::query("ALTER TABLE claudecode_sessions ADD COLUMN owner TEXT")
+            .execute(&self.pool)
+            .await;
+
         Ok(())
     }
 
@@ -272,12 +278,25 @@ impl ClaudeCodeStorage {
 
     /// Get a session by name (supports partial matching)
     pub async fn session_get_by_name(&self, name: &str) -> Result<ClaudeCodeConfig, ClaudeCodeError> {
+        self.session_get_by_name_owned_by(name, None).await
+    }
+
+    /// PLEXUS-6: [`Self::session_get_by_name`] among the sessions `owner`
+    /// created (`None`: among all). Another's session is not found — the
+    /// same answer as one that does not exist, and never named in an
+    /// ambiguity.
+    pub async fn session_get_by_name_owned_by(&self, name: &str, owner: Option<&str>) -> Result<ClaudeCodeConfig, ClaudeCodeError> {
+        let mine = if owner.is_some() { " AND owner = ?" } else { "" };
         // Try exact match first
-        if let Some(row) = sqlx::query(
+        let exact = format!(
             "SELECT id, name, claude_session_id, loopback_session_id, tree_id, canonical_head, working_dir, model, system_prompt, mcp_config, loopback_enabled, metadata, created_at, updated_at
-             FROM claudecode_sessions WHERE name = ?",
-        )
-        .bind(name)
+             FROM claudecode_sessions WHERE name = ?{mine}",
+        );
+        let mut q = sqlx::query(&exact).bind(name);
+        if let Some(o) = owner {
+            q = q.bind(o);
+        }
+        if let Some(row) = q
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| db_err("fetch session by name", e))?
@@ -287,11 +306,15 @@ impl ClaudeCodeStorage {
 
         // Try partial match
         let pattern = format!("{name}%");
-        let rows = sqlx::query(
+        let partial = format!(
             "SELECT id, name, claude_session_id, loopback_session_id, tree_id, canonical_head, working_dir, model, system_prompt, mcp_config, loopback_enabled, metadata, created_at, updated_at
-             FROM claudecode_sessions WHERE name LIKE ?",
-        )
-        .bind(&pattern)
+             FROM claudecode_sessions WHERE name LIKE ?{mine}",
+        );
+        let mut q = sqlx::query(&partial).bind(&pattern);
+        if let Some(o) = owner {
+            q = q.bind(o);
+        }
+        let rows = q
         .fetch_all(&self.pool)
         .await
         .map_err(|e| db_err("fetch session by pattern", e))?;
@@ -311,10 +334,21 @@ impl ClaudeCodeStorage {
 
     /// List all sessions
     pub async fn session_list(&self) -> Result<Vec<ClaudeCodeInfo>, ClaudeCodeError> {
-        let rows = sqlx::query(
+        self.session_list_owned_by(None).await
+    }
+
+    /// PLEXUS-6: the sessions `owner` created (`None`: all of them).
+    pub async fn session_list_owned_by(&self, owner: Option<&str>) -> Result<Vec<ClaudeCodeInfo>, ClaudeCodeError> {
+        let mine = if owner.is_some() { "WHERE owner = ? " } else { "" };
+        let sql = format!(
             "SELECT id, name, claude_session_id, tree_id, canonical_head, working_dir, model, loopback_enabled, created_at
-             FROM claudecode_sessions ORDER BY created_at DESC",
-        )
+             FROM claudecode_sessions {mine}ORDER BY created_at DESC",
+        );
+        let mut q = sqlx::query(&sql);
+        if let Some(o) = owner {
+            q = q.bind(o);
+        }
+        let rows = q
         .fetch_all(&self.pool)
         .await
         .map_err(|e| db_err("list sessions", e))?;
@@ -478,6 +512,29 @@ impl ClaudeCodeStorage {
             .await
             .map_err(|e| db_err("check session exists", e))?;
         Ok(row.is_some())
+    }
+
+    /// PLEXUS-6: record the principal that created a session.
+    pub async fn session_set_owner(&self, session_id: &ClaudeCodeId, owner: &str) -> Result<(), ClaudeCodeError> {
+        sqlx::query("UPDATE claudecode_sessions SET owner = ? WHERE id = ?")
+            .bind(owner)
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| db_err("set session owner", e))?;
+        Ok(())
+    }
+
+    /// PLEXUS-6: the principal that created a session (`None`: made in
+    /// process, or before login); not found when there is no such session.
+    pub async fn session_owner(&self, session_id: &ClaudeCodeId) -> Result<Option<String>, ClaudeCodeError> {
+        let row = sqlx::query("SELECT owner FROM claudecode_sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| db_err("fetch session owner", e))?
+            .ok_or_else(|| ClaudeCodeError::SessionNotFound { identifier: session_id.to_string() })?;
+        Ok(row.get("owner"))
     }
 
     /// Enumerate every session ID known to storage.

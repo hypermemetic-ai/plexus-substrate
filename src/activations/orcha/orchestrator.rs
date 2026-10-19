@@ -97,7 +97,7 @@ pub(super) async fn run_orchestration_task<P: HubContext>(
         // loopback_session_id will be set to cc_session_id after create() returns.
         // We pass None here and update storage directly after, since create() doesn't
         // know the cc_session_id until after the DB insert.
-        let create_stream = claudecode.create(
+        let create_stream = claudecode.create(None, 
             cc_session_name.clone(),
             request.working_directory.clone(),
             model,
@@ -167,7 +167,7 @@ pub(super) async fn run_orchestration_task<P: HubContext>(
             // Record task prompt in arbor via context
             ctx.prompt_created(task_prompt.clone(), retry_count).await;
 
-            let chat_stream = claudecode.chat(
+            let chat_stream = claudecode.chat(None, 
                 cc_session_name.clone(),
                 task_prompt,
                 None, // ephemeral
@@ -526,7 +526,7 @@ async fn handle_tool_approval<P: HubContext>(
     let decision_session = format!("orcha-approval-{}", uuid::Uuid::new_v4());
     let decision_session_id = format!("{}-approval-{}", orcha_session_id, uuid::Uuid::new_v4());
 
-    let create_stream = claudecode.create(
+    let create_stream = claudecode.create(None, 
         decision_session.clone(),
         "/workspace".to_string(),
         crate::activations::claudecode::Model::Haiku, // Fast decision with Haiku
@@ -577,7 +577,7 @@ async fn handle_tool_approval<P: HubContext>(
         serde_json::to_string_pretty(&tool_input).unwrap_or_else(|_| tool_input.to_string())
     );
 
-    let chat_stream = claudecode.chat(
+    let chat_stream = claudecode.chat(None, 
         decision_session.clone(),
         prompt,
         Some(true), // Ephemeral
@@ -674,7 +674,7 @@ pub(super) async fn run_agent_task<P: HubContext>(
         };
 
         // Start the chat
-        let chat_stream = claudecode.chat(
+        let chat_stream = claudecode.chat(None, 
             agent_info.claudecode_session_id.clone(),
             task_prompt,
             None, // Not ephemeral
@@ -961,7 +961,7 @@ async fn handle_agent_spawn_request<P: HubContext>(
     // Create ClaudeCode session for this helper agent
     let cc_session_name = format!("orcha-agent-{}", Uuid::new_v4());
 
-    let create_stream = claudecode.create(
+    let create_stream = claudecode.create(None, 
         cc_session_name.clone(),
         "/workspace".to_string(), // TODO: Get from session
         model,

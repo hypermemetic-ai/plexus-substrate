@@ -9,6 +9,10 @@
 //!
 //! Event types are plain domain types (no special traits needed).
 //! The macro handles wrapping with `wrap_stream()` at the call site.
+// PLEXUS-6: the 0.6 macros' legacy form (MACRO-13) — these activations keep
+// `namespace = …` and their own type names; the name rule's trait would need
+// one event type per activation. Its deprecation note is allowed here.
+#![allow(deprecated)]
 
 use super::types::EchoEvent;
 use async_stream::stream;
@@ -36,9 +40,11 @@ impl Default for Echo {
 /// - `EchoRpcServer` implementation
 /// - Activation trait implementation
 /// - `EchoMethod` enum with JSON schemas
+// PLEXUS-6: harmless — a viewer may use it to see that it is in.
 #[plexus_macros::activation(namespace = "echo",
 version = "1.0.0",
-description = "Echo messages back - demonstrates plexus-macros usage")]
+description = "Echo messages back - demonstrates plexus-macros usage",
+roles(viewer = ["echo", "once", "ping"]))]
 impl Echo {
     /// Echo a message back
     #[plexus_macros::method(description = "Echo a message back the specified number of times",

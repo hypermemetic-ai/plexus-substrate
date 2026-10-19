@@ -489,7 +489,7 @@ async fn test_render_resolved_with_mock_resolver() {
 //
 // Verifies that Cone surfaces `of` as a role-tagged DynamicChild method with
 // `list_method = Some("cone_ids")`, and that `ChildRouter::get_child` resolves
-// valid UUIDs to `Some(ConeActivation)` and rejects unknown IDs with `None`.
+// valid UUIDs to `Some(ConeChild)` and rejects unknown IDs with `None`.
 // ============================================================================
 
 /// AC #3: `plugin_schema()` has `of` method tagged as

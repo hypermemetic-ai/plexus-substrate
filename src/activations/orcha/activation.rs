@@ -1,3 +1,7 @@
+// PLEXUS-6: the 0.6 macros' legacy form (MACRO-13) — these activations keep
+// `namespace = …` and their own type names; the name rule's trait would need
+// one event type per activation. Its deprecation note is allowed here.
+#![allow(deprecated)]
 use super::graph_runner;
 use super::graph_runtime::GraphRuntime;
 use super::orchestrator::run_orchestration_task;
@@ -804,7 +808,7 @@ impl<P: HubContext> Orcha<P> {
             let summary_session_id = format!("{}-check-{}", session_id, Uuid::new_v4());
 
             // Create the session - using Haiku for fast, cheap summaries
-            let create_stream = claudecode.create(
+            let create_stream = claudecode.create(None, 
                 summary_session.clone(),
                 "/workspace".to_string(), // Default, doesn't matter for ephemeral
                 crate::activations::claudecode::Model::Haiku,
@@ -872,7 +876,7 @@ impl<P: HubContext> Orcha<P> {
                 )
             };
 
-            let chat_stream = claudecode.chat(
+            let chat_stream = claudecode.chat(None, 
                 summary_session.clone(),
                 prompt,
                 Some(true), // Ephemeral - don't save to history
@@ -957,7 +961,7 @@ impl<P: HubContext> Orcha<P> {
             let cc_session_name = format!("orcha-agent-{}", Uuid::new_v4());
             let agent_session_id = format!("{}-agent-{}", session.session_id, Uuid::new_v4());
 
-            let create_stream = claudecode.create(
+            let create_stream = claudecode.create(None, 
                 cc_session_name.clone(),
                 "/workspace".to_string(),  // TODO: Get from session
                 model,
@@ -2696,7 +2700,7 @@ async fn generate_agent_summary<P: HubContext>(
     let summary_session = format!("orcha-agent-summary-{}", Uuid::new_v4());
     let summary_session_id = format!("{}-agent-summary-{}", agent.session_id, Uuid::new_v4());
 
-    let create_stream = claudecode.create(
+    let create_stream = claudecode.create(None, 
         summary_session.clone(),
         "/workspace".to_string(),
         crate::activations::claudecode::Model::Haiku,
@@ -2731,7 +2735,7 @@ async fn generate_agent_summary<P: HubContext>(
         conversation
     );
 
-    let chat_stream = claudecode.chat(summary_session, prompt, Some(true), None).await;
+    let chat_stream = claudecode.chat(None, summary_session, prompt, Some(true), None).await;
     tokio::pin!(chat_stream);
 
     let mut summary = String::new();
@@ -2761,7 +2765,7 @@ async fn generate_overall_summary<P: HubContext>(
     let meta_summary_session_id = format!("{}-meta-summary-{}", session_id, Uuid::new_v4());
 
     // Create session
-    let create_stream = claudecode.create(
+    let create_stream = claudecode.create(None, 
         summary_session.clone(),
         "/workspace".to_string(),
         crate::activations::claudecode::Model::Haiku,
@@ -2804,7 +2808,7 @@ async fn generate_overall_summary<P: HubContext>(
         agent_list
     );
 
-    let chat_stream = claudecode.chat(summary_session, prompt, Some(true), None).await;
+    let chat_stream = claudecode.chat(None, summary_session, prompt, Some(true), None).await;
     tokio::pin!(chat_stream);
 
     let mut summary = String::new();

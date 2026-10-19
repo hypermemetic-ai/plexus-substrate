@@ -86,6 +86,9 @@ fn plexus_to_mcp_error(e: PlexusError) -> McpError {
         PlexusError::Unauthenticated(reason) => {
             McpError::invalid_params(format!("Unauthenticated: {reason}"), None)
         }
+        PlexusError::Forbidden { reason } => {
+            McpError::invalid_params(format!("Forbidden: {reason:?}"), None)
+        }
     }
 }
 

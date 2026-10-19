@@ -378,7 +378,7 @@ async fn dispatch_task<P: HubContext + 'static>(
     });
 
     let create_stream = claudecode
-        .create(session_name.clone(), working_directory, model, None, Some(true), Some(graph_id.to_string()))
+        .create(None, session_name.clone(), working_directory, model, None, Some(true), Some(graph_id.to_string()))
         .await;
     tokio::pin!(create_stream);
 
@@ -392,7 +392,7 @@ async fn dispatch_task<P: HubContext + 'static>(
         }
     }
 
-    let chat_stream = claudecode.chat(session_name, prompt, None, None).await;
+    let chat_stream = claudecode.chat(None, session_name, prompt, None, None).await;
     tokio::pin!(chat_stream);
 
     let mut output_text = String::new();
