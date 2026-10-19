@@ -659,6 +659,7 @@ fn chat_stream_for_config(
 // sessions_* methods over this machine's Claude Code files, and a session's
 // dynamic child path — only admin holds.
 #[plexus_macros::activation(namespace = "claudecode",
+client,
 version = "1.0.0",
 description = "Manage Claude Code sessions with Arbor-backed conversation history",
 resolve_handle,
