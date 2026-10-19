@@ -24,6 +24,16 @@ impl BackendSource {
             BackendSource::Env => "env",
         }
     }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(BackendSource::Auto),
+            "file" => Some(BackendSource::File),
+            "manual" => Some(BackendSource::Manual),
+            "env" => Some(BackendSource::Env),
+            _ => None,
+        }
+    }
 }
 
 /// Backend connection information
@@ -73,6 +83,31 @@ impl BackendInfo {
     }
 }
 
+/// Configuration for a backend from TOML file
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BackendConfig {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+fn default_protocol() -> String {
+    "ws".to_string()
+}
+
+/// Registry configuration from TOML file
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RegistryConfig {
+    #[serde(default)]
+    pub backend: Vec<BackendConfig>,
+}
+
 /// Events emitted by registry methods
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -95,11 +130,15 @@ pub enum RegistryEvent {
 
     /// Single backend info
     #[serde(rename = "backend")]
-    Backend { backend: BackendInfo },
+    Backend { backend: Option<BackendInfo> },
 
     /// Ping response
     #[serde(rename = "ping")]
-    Ping { name: String, success: bool, message: String },
+    Ping {
+        name: String,
+        success: bool,
+        message: String,
+    },
 
     /// Config reloaded
     #[serde(rename = "reloaded")]
@@ -108,4 +147,28 @@ pub enum RegistryEvent {
     /// Error occurred
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+/// Configuration for Registry storage
+#[derive(Debug, Clone)]
+pub struct RegistryStorageConfig {
+    /// Path to SQLite database
+    pub db_path: std::path::PathBuf,
+    /// Optional path to TOML config file
+    pub config_path: Option<std::path::PathBuf>,
+}
+
+impl Default for RegistryStorageConfig {
+    fn default() -> Self {
+        // PLEXUS-6: a throwaway substrate's --data-dir holds its registry too.
+        let config_dir = crate::activations::storage::data_dir().map_or_else(
+            || dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("plexus"),
+            |d| d.join("registry"),
+        );
+
+        Self {
+            db_path: config_dir.join("registry.db"),
+            config_path: Some(config_dir.join("backends.toml")),
+        }
+    }
 }

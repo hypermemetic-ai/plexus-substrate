@@ -76,9 +76,9 @@ session via `synapse <backend> claudecode.session <id>.<method>`.
 
 | Child | Kind | list method | search method | Description |
 |---|---|---|---|---|
-| `session` | dynamic | `session_ids` | `session` | Look up a session by UUID and return a `SessionActivation` — a typed per-session namespace (IR-18). Fails with `None` on malformed UUIDs or unknown ids. |
+| `session` | dynamic | `session_ids` | `session` | Look up a session by UUID and return a `SessionChild` — a typed per-session namespace (IR-18). Fails with `None` on malformed UUIDs or unknown ids. |
 
-## Methods (SessionActivation — per-session)
+## Methods (SessionChild — per-session)
 
 Exposed via `claudecode.session <id>.<method>`:
 
@@ -142,7 +142,7 @@ synapse --port 44104 lforge substrate claudecode.session \
 
 ## Source
 
-- `activation.rs` — `ClaudeCode<P>` + `SessionActivation` RPC surfaces,
+- `activation.rs` — `ClaudeCode<P>` + `SessionChild` RPC surfaces,
   handle resolution, dynamic `session` child gate
 - `executor.rs` — Claude Code CLI spawn + event parsing, MCP reachability
 - `sessions.rs` — session-file reader / writer

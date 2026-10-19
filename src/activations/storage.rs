@@ -6,6 +6,22 @@
 
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePool}, ConnectOptions};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// PLEXUS-6: where a throwaway substrate keeps its databases (`--data-dir`),
+/// in place of `~/.plexus/substrate` and the registry's `~/.config/plexus`.
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set the data directory for this process, before the hub is built. The
+/// first call wins; a later one answers `false` and changes nothing.
+pub fn set_data_dir(dir: PathBuf) -> bool {
+    DATA_DIR.set(dir).is_ok()
+}
+
+/// The data directory set by [`set_data_dir`], if any.
+pub fn data_dir() -> Option<&'static PathBuf> {
+    DATA_DIR.get()
+}
 
 /// Generate a namespaced database path under ~/.plexus/
 ///
@@ -21,6 +37,9 @@ use std::path::PathBuf;
 /// // Returns: ~/.plexus/substrate/activations/orcha/orcha.db
 /// ```
 pub fn activation_db_path(activation_name: &str, db_filename: &str) -> PathBuf {
+    if let Some(dir) = data_dir() {
+        return dir.join("activations").join(activation_name).join(db_filename);
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());

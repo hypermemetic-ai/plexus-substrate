@@ -45,3 +45,6 @@ pub mod lattice;
 
 // Changelog tracks plexus hash transitions and planned changes
 pub mod changelog;
+
+// Registry — backend discovery (PLEXUS-6: vendored from plexus-registry 0.1)
+pub mod registry;

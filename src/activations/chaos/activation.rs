@@ -1,3 +1,7 @@
+// PLEXUS-6: the 0.6 macros' legacy form (MACRO-13) — these activations keep
+// `namespace = …` and their own type names; the name rule's trait would need
+// one event type per activation. Its deprecation note is allowed here.
+#![allow(deprecated)]
 use super::types::{ListRunningResult, RunningNode, InjectResult, ListProcessesResult, ProcessInfo, KillProcessResult, GraphSnapshotResult, NodeSnapshot};
 use crate::activations::lattice::{LatticeStorage, NodeStatus};
 use async_stream::stream;

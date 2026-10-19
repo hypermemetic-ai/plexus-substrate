@@ -17,6 +17,10 @@
 //! `#[allow(deprecated)]` block *inside the macro's output*, so the
 //! substrate build does not need — and must not have — a module-level
 //! suppression.
+// PLEXUS-6: the 0.6 macros' legacy form (MACRO-13) — these activations keep
+// `namespace = …` and their own type names; the name rule's trait would need
+// one event type per activation. Its deprecation note is allowed here.
+#![allow(deprecated)]
 
 use super::celestial::{build_solar_system, CelestialBody, CelestialBodyActivation};
 use super::types::{BodyType, SolarEvent};

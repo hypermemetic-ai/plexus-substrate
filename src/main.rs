@@ -1,33 +1,65 @@
-use plexus_substrate::build_plexus_rpc;
+use plexus_login::login::Provider;
+use plexus_substrate::login::{self as substrate_login, LoginConfig, StartGrant};
 use plexus_transport::TransportServer;
-#[cfg(feature = "mcp-gateway")]
-use plexus_transport::{serve_combined, RouteFn};
 use clap::Parser;
-#[cfg(feature = "mcp-gateway")]
-use std::sync::Arc;
 
 /// CLI arguments for substrate
 #[derive(Parser, Debug)]
 #[command(name = "substrate")]
-#[command(about = "Substrate Plexus RPC server - JSON-RPC over WebSocket or stdio")]
+#[command(about = "Substrate Plexus RPC server - JSON-RPC over WebSocket, under login")]
 struct Args {
-    /// Run in stdio mode for MCP compatibility (line-delimited JSON-RPC over stdin/stdout)
-    #[arg(long)]
+    /// Refused (PLEXUS-6): stdio cannot carry a credential.
+    #[arg(long, hide = true)]
     stdio: bool,
 
-    /// Port for WebSocket + MCP HTTP server (ignored in stdio mode)
+    /// Port for the WebSocket
     #[arg(short, long, default_value = "4444")]
     port: u16,
 
-    /// Disable built-in MCP HTTP server (WebSocket only)
+    /// Accepted and changes nothing (PLEXUS-6): under login the MCP HTTP
+    /// gateway is not served — it cannot carry a caller to the gate.
     #[arg(long)]
     no_mcp: bool,
 
-    /// Bearer token required on all WebSocket and MCP HTTP connections.
-    /// Also read from the `PLEXUS_API_KEY` environment variable.
-    /// When neither is provided, no authentication is required.
-    #[arg(long, env = "PLEXUS_API_KEY")]
+    /// Retired (PLEXUS-6): the shared bearer token is gone; callers sign in
+    /// through a login provider. Given, substrate refuses to start.
+    #[arg(long, env = "PLEXUS_API_KEY", hide = true, hide_env_values = true)]
     api_key: Option<String>,
+
+    /// PLEXUS-6: admit callers through this login provider (repeatable;
+    /// `;`-separated in the variable): `key` — agents' Ed25519 key proofs
+    /// naming this socket (synapse `_login substrate --key NAME`) — and
+    /// people's providers as plexus-login takes them (`idp=<issuer>,<aud>`,
+    /// `workos=<client>`, `oidc:<name>=…`, `auth0=…`, `nostr=…`). At least
+    /// one: there is no open mode.
+    #[arg(long = "auth-provider", env = "SUBSTRATE_AUTH_PROVIDERS", value_name = "SPEC", value_delimiter = ';')]
+    auth_provider: Vec<Provider>,
+
+    /// PLEXUS-6: a principal that is admin everywhere from the start
+    /// (`key:<hex>` — `synapse _key show NAME` —, `idp:<uuid>`, …).
+    #[arg(long, env = "SUBSTRATE_ADMINS", value_name = "PRINCIPAL", value_delimiter = ';')]
+    admin: Vec<String>,
+
+    /// PLEXUS-6: a standing grant, `ROLE=PRINCIPAL` (`viewer`, `editor`,
+    /// `admin`) — e.g. the chat bridge's key as `editor`: claudecode
+    /// sessions of its own, nothing else.
+    #[arg(long, env = "SUBSTRATE_GRANTS", value_name = "ROLE=PRINCIPAL", value_delimiter = ';')]
+    grant: Vec<StartGrant>,
+
+    /// PLEXUS-6: serve the login page for people on this port (agents need
+    /// none).
+    #[arg(long, env = "SUBSTRATE_LOGIN_PORT")]
+    login_port: Option<u16>,
+
+    /// PLEXUS-6: where people reach the login page (default
+    /// `http://127.0.0.1:<login-port>`).
+    #[arg(long, env = "SUBSTRATE_PUBLIC_URL")]
+    public_url: Option<String>,
+
+    /// PLEXUS-6: keep every database under this directory instead of
+    /// `~/.plexus/substrate` (a throwaway substrate).
+    #[arg(long, env = "SUBSTRATE_DATA_DIR")]
+    data_dir: Option<std::path::PathBuf>,
 }
 
 
@@ -78,14 +110,28 @@ async fn main() -> anyhow::Result<()> {
     tracing::debug!("  ├─ debug :: introspection enabled");
     tracing::trace!("  └─ trace :: full observability unlocked");
 
+    // PLEXUS-6: no open mode, no shared token, no stdio.
     if args.api_key.is_some() {
-        tracing::info!("Authentication: bearer token configured (--api-key / PLEXUS_API_KEY)");
-    } else {
-        tracing::warn!("Authentication: DISABLED — set --api-key or PLEXUS_API_KEY to require bearer tokens");
+        anyhow::bail!("--api-key / PLEXUS_API_KEY is retired: substrate takes callers through a login provider (--auth-provider key, synapse _login)");
+    }
+    if let Some(why) = substrate_login::refusal(&args.auth_provider, args.stdio) {
+        anyhow::bail!(why);
+    }
+    if let Some(dir) = &args.data_dir {
+        plexus_substrate::activations::storage::set_data_dir(dir.clone());
+        tracing::info!("Data:      {}", dir.display());
     }
 
-    // Build Plexus RPC hub (returns Arc<DynamicHub>)
-    let hub = build_plexus_rpc().await;
+    let cfg = LoginConfig {
+        providers: args.auth_provider.clone(),
+        admins: args.admin.clone(),
+        grants: args.grant.clone(),
+        ws_port: args.port,
+        login_port: args.login_port,
+        public_url: args.public_url.clone(),
+    };
+    // Build the Plexus RPC hub behind the gate (returns Arc<DynamicHub>)
+    let (hub, login) = substrate_login::build(&cfg, None).await?;
     let activations = hub.list_activations_info();
     let methods = hub.list_methods();
     let plexus_hash = hub.compute_hash();
@@ -113,53 +159,20 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to create RPC module: {e}"))
     };
 
-    if args.stdio {
-        // Stdio mode: line-delimited JSON-RPC over stdin/stdout
-        tracing::info!("Starting stdio transport (MCP-compatible)");
-        TransportServer::builder(hub, rpc_converter)
-            .with_stdio()
-            .build().await?.serve().await
-    } else if args.no_mcp {
-        // WebSocket only
-        tracing::info!("Substrate Plexus RPC server started");
-        tracing::info!("  WebSocket: ws://127.0.0.1:{}", args.port);
-        tracing::info!("  MCP HTTP:  disabled");
-        TransportServer::builder(hub, rpc_converter)
-            .with_websocket(args.port)
-            .with_api_key(args.api_key)
-            .build().await?.serve().await
-    } else {
-        #[cfg(feature = "mcp-gateway")]
-        {
-            // Combined WebSocket + MCP HTTP on same port
-            use plexus_core::plexus::DynamicHub;
-            let flat_schemas = hub.list_plugin_schemas();
-            let module = DynamicHub::arc_into_rpc_module(hub.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to create RPC module: {e}"))?;
-            let hub_route = hub.clone();
-            let route_fn: RouteFn = Arc::new(move |method, params| {
-                let hub = hub_route.clone();
-                Box::pin(async move { hub.route(&method, params, None).await })
-            });
-            let addr: std::net::SocketAddr = format!("127.0.0.1:{}", args.port).parse()?;
-            tracing::info!("Substrate Plexus RPC server started");
-            tracing::info!("  WebSocket: ws://127.0.0.1:{}", args.port);
-            tracing::info!("  MCP HTTP:  http://127.0.0.1:{}/mcp", args.port);
-            let handle = serve_combined(module, hub, Some(flat_schemas), Some(route_fn), addr, args.api_key, false).await?;
-            handle.stopped().await;
-            Ok(())
-        }
-        #[cfg(not(feature = "mcp-gateway"))]
-        {
-            // Fallback: WebSocket + separate MCP HTTP on next port
-            tracing::info!("Substrate Plexus RPC server started");
-            tracing::info!("  WebSocket: ws://127.0.0.1:{}", args.port);
-            tracing::info!("  MCP HTTP:  http://127.0.0.1:{}/mcp", args.port + 1);
-            TransportServer::builder(hub, rpc_converter)
-                .with_websocket(args.port)
-                .with_mcp_http(args.port + 1)
-                .with_api_key(args.api_key)
-                .build().await?.serve().await
-        }
+    let names: Vec<&str> = args.auth_provider.iter().map(Provider::name).collect();
+    tracing::info!("Substrate Plexus RPC server started");
+    tracing::info!("  WebSocket: ws://127.0.0.1:{}", args.port);
+    tracing::info!("  Login:     {} — anonymous callers see only the auth door", names.join(", "));
+    tracing::info!("  MCP HTTP:  not served under login{}", if args.no_mcp { "" } else { " (it cannot carry a caller to the gate)" });
+    if let (Some(port), Some(router)) = (args.login_port, login.router()) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+        tracing::info!("  Login page: http://127.0.0.1:{port}/login");
+        tokio::spawn(async move {
+            if let Err(e) = axum08::serve(listener, router).await {
+                tracing::error!("login page exited: {e}");
+            }
+        });
     }
+    let builder = TransportServer::builder(hub, rpc_converter).with_websocket(args.port);
+    login.apply(builder).build().await?.serve().await
 }

@@ -49,9 +49,34 @@ Three layers. Each knows only about the layer below it.
 Everything is exposed on port `4444`:
 
 - **WebSocket** — `ws://localhost:4444`
-- **MCP** — `http://localhost:4444/mcp` (all methods appear as MCP tools)
+- **MCP** — `http://localhost:4444/mcp` (all methods appear as MCP tools; not served under login, below)
 - **Synapse CLI** — `synapse substrate <namespace> <method> [--param value]`
 - **In-process Rust** — `DynamicHub::call(method, params)`
+
+### Login (PLEXUS-6)
+
+There is no open mode and no shared `--api-key`: substrate takes callers
+through `plexus-login` (menger's login) and plexus-core's gate.
+
+```bash
+substrate --port 4444 --auth-provider key \
+  --admin "$(synapse _key show operator)" \
+  --grant "editor=$(synapse _key show builder)" \
+  --data-dir ~/.local/share/substrate
+synapse -P 4444 _login substrate --key builder --as builder
+```
+
+- An anonymous connection reaches only `auth.*`; a refused credential is a
+  401 at the upgrade; a method outside the caller's roles is `forbidden`.
+- `viewer`: `health`, `echo`, and reading one's own claudecode sessions;
+  `editor`: viewer plus create / chat / fork / delete of one's own sessions.
+  Everything else (bash, arbor, cone, orcha, `sessions_*`, …) is `admin`.
+- A claudecode session belongs to the principal that created it; another
+  key sees `session not found`. An admin reaches every session.
+- `--grant ROLE=PRINCIPAL` (`SUBSTRATE_GRANTS`) gives standing grants;
+  `auth.grant` at runtime is forgotten at restart. `--login-port` serves
+  the login page for people's providers (`idp=…`, `workos=…`).
+- Under login, stdio and the MCP HTTP gateway are not served.
 
 ---
 

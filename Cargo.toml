@@ -44,7 +44,7 @@ dirs = "5.0"
 which = "6.0"
 # JSON-RPC server and client dependencies
 jsonrpsee = { version = "0.26", features = ["server", "client", "ws-client", "macros"] }
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.0", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "tracing-log"] }
 dotenvy = "0.15"
@@ -61,11 +61,19 @@ dialectic = { version = "0.4.1", features = ["tokio"] }
 # MCP server via rmcp
 rmcp = { version = "0.12", features = ["server", "transport-io", "transport-streamable-http-server"] }
 cllient = "0.2.1"
-plexus-macros = "0.5"
-plexus-core = "0.5"
-plexus-transport = { version = "0.2", features = ["mcp-gateway"] }
+# PLEXUS-6: the plexus 0.6 line by sibling path (menger's MFE-10) — the
+# same graph menger resolves, one of each.
+plexus-macros = { path = "../plexus-macros", version = "0.6" }
+plexus-core = { path = "../plexus-core", version = "0.6" }
+plexus-transport = { path = "../plexus-transport", version = "0.5", features = ["mcp-gateway"] }
+plexus-auth-core = { path = "../plexus-auth-core", version = "0.2", features = ["adapters"] }
+# PLEXUS-6: login as menger takes it — the providers' adapters (`key` for
+# agents' Ed25519 proofs), the session table, the gate's wiring and the
+# auth backend, with the ready-made global-role rules (SimpleAccess).
+plexus-login = { path = "../menger/plexus-login", version = "0.2" }
+# plexus-login's login page is an axum 0.8 router.
+axum08 = { package = "axum", version = "0.8" }
 # plexus-jsexec = "0.1.0"  # temporarily disabled - needs API updates
-registry = { package = "plexus-registry", version = "0.1.0" }
 
 # Mustache templating
 mustache = "0.9"
@@ -88,6 +96,9 @@ reqwest = { version = "0.11", features = ["json"] }
 jsonrpsee = { version = "0.26", features = ["client", "ws-client"] }
 tokio-tungstenite = "0.21"
 tempfile = "3"
+# PLEXUS-6: tests/login.rs signs agents' key proofs and forges one.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+base64 = "0.22"
 
 [[example]]
 name = "rmcp_mcp_server"
