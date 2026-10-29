@@ -14,10 +14,6 @@ path = "src/lib.rs"
 name = "plexus-substrate"
 path = "src/main.rs"
 
-[[bin]]
-name = "mcp-gateway"
-path = "src/bin/mcp_gateway.rs"
-
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -33,8 +29,6 @@ anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 either = "1.9"
 schemars = { version = "1.1", features = ["derive", "uuid1"] }
-axum = { version = "0.7" }
-tower = "0.4"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
 uuid = { version = "1.6", features = ["v4", "v5", "serde"] }
 rand = "0.8"
@@ -48,18 +42,13 @@ clap = { version = "4.0", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "tracing-log"] }
 dotenvy = "0.15"
-tower-http = { version = "0.5", features = ["trace", "util", "cors"] }
 http = "1.0"
-http-body-util = "0.1"
-form_urlencoded = "1.2"  # For parsing query parameters in MCP gateway
 
 # LLM client
 
 # Session types for method protocols
 dialectic = { version = "0.4.1", features = ["tokio"] }
 
-# MCP server via rmcp
-rmcp = { version = "0.12", features = ["server", "transport-io", "transport-streamable-http-server"] }
 cllient = "0.2.1"
 # PLEXUS-6: the plexus 0.6 line by sibling path (menger's MFE-10) — the
 # same graph menger resolves, one of each.
@@ -68,7 +57,10 @@ plexus-core = { path = "../plexus-core", version = "0.6" }
 # TETHER-7: claudecode's emitted client (`ClaudeCodeClient<T>`), so a program
 # that imports substrate calls it with substrate's own client.
 plexus-client = { path = "../plexus-macros/plexus-client", version = "0.6" }
-plexus-transport = { path = "../plexus-transport", version = "0.5", features = ["mcp-gateway"] }
+# TRANSPORT-18: the MCP bridge mounted under the login (`with_mcp`) — the one
+# bridge, plexus-transport-mcp's; substrate's own copy, gateway and session
+# table are gone.
+plexus-transport = { path = "../plexus-transport", version = "0.5", features = ["mcp"] }
 plexus-auth-core = { path = "../plexus-auth-core", version = "0.2", features = ["adapters"] }
 # PLEXUS-6: login as menger takes it — the providers' adapters (`key` for
 # agents' Ed25519 proofs), the session table, the gate's wiring and the
@@ -85,8 +77,9 @@ mustache = "0.9"
 libc = { version = "0.2", optional = true }
 
 [features]
-default = ["mcp-gateway"]
-mcp-gateway = ["plexus-transport/mcp-gateway"]
+default = ["mcp"]
+# TRANSPORT-18: `/mcp` through the mounted bridge, behind the login.
+mcp = ["plexus-transport/mcp"]
 # chaos: opt-in fault-injection activation. Pulls in libc + two narrow
 # unsafe blocks (libc::kill SIGKILL/SIGTERM). Off by default so the
 # baseline library has zero unsafe compiled in.
@@ -95,17 +88,15 @@ chaos = ["dep:libc"]
 [dev-dependencies]
 hyper = "1"
 tower = { version = "0.5", features = ["util"] }
-reqwest = { version = "0.11", features = ["json"] }
+# TRANSPORT-18: an rmcp 3.x client over streamable HTTP for tests/mcp.rs.
+rmcp = { version = "3.8", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 jsonrpsee = { version = "0.26", features = ["client", "ws-client"] }
 tokio-tungstenite = "0.21"
 tempfile = "3"
 # PLEXUS-6: tests/login.rs signs agents' key proofs and forges one.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 base64 = "0.22"
-
-[[example]]
-name = "rmcp_mcp_server"
-path = "examples/rmcp_mcp_server.rs"
 
 # --- Lint posture ---
 #
@@ -203,7 +194,7 @@ format_push_string = "allow"
 # fluent builder/constructor helpers. Adding `#[must_use]` to each is noise;
 # calling idioms at use sites already capture the value.
 return_self_not_must_use = "allow"
-# `manual_let_else` is stylistic pedantic. Many sites are hub methods that
+# `manual_let_else` is stylistic pedantic. Many sites are service methods that
 # use an early-return `yield Error; return;` pattern that `let ... else`
 # handles poorly.
 manual_let_else = "allow"

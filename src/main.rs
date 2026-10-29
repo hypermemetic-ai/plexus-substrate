@@ -16,10 +16,30 @@ struct Args {
     #[arg(short, long, default_value = "4444")]
     port: u16,
 
-    /// Accepted and changes nothing (PLEXUS-6): under login the MCP HTTP
-    /// gateway is not served — it cannot carry a caller to the gate.
+    /// TRANSPORT-18: no `/mcp`. By default it is served through the mounted
+    /// bridge, behind the login — every tool call is the caller's.
     #[arg(long)]
     no_mcp: bool,
+
+    /// TRANSPORT-18: the port `/mcp` listens on (default: the WebSocket's
+    /// port + 1).
+    #[arg(long, env = "SUBSTRATE_MCP_PORT")]
+    mcp_port: Option<u16>,
+
+    /// TRANSPORT-18: a TOML `McpConfig` table (its `listen` wins over
+    /// --mcp-port; `[oauth]`, `[limits]`, `allowed_hosts` …).
+    #[arg(long, env = "SUBSTRATE_MCP_CONFIG", value_name = "FILE")]
+    mcp_config: Option<std::path::PathBuf>,
+
+    /// TRANSPORT-18: `/mcp` as an OAuth 2.1 resource — its identifier, the
+    /// public URL clients reach it at (the audience a token must carry).
+    #[arg(long, env = "SUBSTRATE_MCP_RESOURCE", value_name = "URL")]
+    mcp_resource: Option<String>,
+
+    /// TRANSPORT-18: an authorization server that mints tokens for the
+    /// resource (repeatable).
+    #[arg(long = "mcp-authorization-server", env = "SUBSTRATE_MCP_AUTHORIZATION_SERVERS", value_name = "URL", value_delimiter = ';')]
+    mcp_authorization_servers: Vec<String>,
 
     /// Retired (PLEXUS-6): the shared bearer token is gone; callers sign in
     /// through a login provider. Given, substrate refuses to start.
@@ -130,11 +150,11 @@ async fn main() -> anyhow::Result<()> {
         login_port: args.login_port,
         public_url: args.public_url.clone(),
     };
-    // Build the Plexus RPC hub behind the gate (returns Arc<DynamicHub>)
-    let (hub, login) = substrate_login::build(&cfg, None).await?;
-    let activations = hub.list_activations_info();
-    let methods = hub.list_methods();
-    let plexus_hash = hub.compute_hash();
+    // Build the Plexus RPC service behind the gate (returns Arc<DynamicHub>)
+    let (service, login) = substrate_login::build(&cfg, None).await?;
+    let activations = service.list_activations_info();
+    let methods = service.list_methods();
+    let plexus_hash = service.compute_hash();
 
     // Log activation info
     tracing::info!("Plexus hash: {}", plexus_hash);
@@ -163,7 +183,20 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Substrate Plexus RPC server started");
     tracing::info!("  WebSocket: ws://127.0.0.1:{}", args.port);
     tracing::info!("  Login:     {} — anonymous callers see only the auth door", names.join(", "));
-    tracing::info!("  MCP HTTP:  not served under login{}", if args.no_mcp { "" } else { " (it cannot carry a caller to the gate)" });
+    #[cfg(feature = "mcp")]
+    let mcp = if args.no_mcp { None } else { Some(mcp_config(&args)?) };
+    #[cfg(feature = "mcp")]
+    match &mcp {
+        Some(cfg) => tracing::info!(
+            "  MCP:       http://{}{} — takes the login's callers{}",
+            cfg.listen.expect("set below"),
+            cfg.path,
+            cfg.oauth.as_ref().map(|o| format!("; an OAuth 2.1 resource, {}", o.resource)).unwrap_or_default()
+        ),
+        None => tracing::info!("  MCP:       off (--no-mcp)"),
+    }
+    #[cfg(not(feature = "mcp"))]
+    tracing::info!("  MCP:       not compiled in (feature mcp)");
     if let (Some(port), Some(router)) = (args.login_port, login.router()) {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
         tracing::info!("  Login page: http://127.0.0.1:{port}/login");
@@ -173,6 +206,43 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    let builder = TransportServer::builder(hub, rpc_converter).with_websocket(args.port);
+    let builder = TransportServer::builder(service, rpc_converter).with_websocket(args.port);
+    #[cfg(feature = "mcp")]
+    let builder = match mcp {
+        Some(cfg) => builder.with_mcp(cfg),
+        None => builder,
+    };
     login.apply(builder).build().await?.serve().await
+}
+
+/// TRANSPORT-18: the mounted bridge's configuration — the file first, then
+/// the flags over it.
+#[cfg(feature = "mcp")]
+fn mcp_config(args: &Args) -> anyhow::Result<plexus_transport::McpConfig> {
+    use plexus_transport::plexus_transport_mcp::OAuthConfig;
+    let mut cfg: plexus_transport::McpConfig = match &args.mcp_config {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("--mcp-config {}: {e}", path.display()))?;
+            toml::from_str(&text).map_err(|e| anyhow::anyhow!("--mcp-config {}: {e}", path.display()))?
+        }
+        None => plexus_transport::McpConfig::default(),
+    };
+    if cfg.listen.is_none() || args.mcp_port.is_some() {
+        let port = args.mcp_port.unwrap_or(args.port + 1);
+        cfg.listen = Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+    }
+    if args.mcp_resource.is_some() || !args.mcp_authorization_servers.is_empty() {
+        let mut oauth = cfg.oauth.take().unwrap_or_default();
+        if let Some(resource) = &args.mcp_resource {
+            oauth.resource = resource.clone();
+        }
+        if !args.mcp_authorization_servers.is_empty() {
+            oauth.authorization_servers = args.mcp_authorization_servers.clone();
+        }
+        if oauth.resource.is_empty() {
+            anyhow::bail!("--mcp-authorization-server needs --mcp-resource (the URL clients reach /mcp at)");
+        }
+        cfg.oauth = Some(OAuthConfig { ..oauth });
+    }
+    Ok(cfg)
 }
