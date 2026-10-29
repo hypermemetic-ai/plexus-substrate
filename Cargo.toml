@@ -89,7 +89,9 @@ chaos = ["dep:libc"]
 hyper = "1"
 tower = { version = "0.5", features = ["util"] }
 # TRANSPORT-18: an rmcp 3.x client over streamable HTTP for tests/mcp.rs.
-rmcp = { version = "3.8", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "3.8", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
+# TRANSPORT-13: plexus-idp in-process — the authorization server tests/mcp_oauth.rs signs in at.
+plexus-idp = { path = "../plexus-idp" }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 jsonrpsee = { version = "0.26", features = ["client", "ws-client"] }
 tokio-tungstenite = "0.21"
