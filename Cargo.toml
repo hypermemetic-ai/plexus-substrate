@@ -62,10 +62,11 @@ plexus-client = { path = "../plexus-macros/plexus-client", version = "0.6" }
 # table are gone.
 plexus-transport = { path = "../plexus-transport", version = "0.5", features = ["mcp"] }
 plexus-auth-core = { path = "../plexus-auth-core", version = "0.2", features = ["adapters"] }
-# PLEXUS-6: login as menger takes it — the providers' adapters (`key` for
+# PLEXUS-6: login as menger takes it, from its own sibling checkout
+# (`../plexus-login`, FRAME-4; FRAME-9) — the providers' adapters (`key` for
 # agents' Ed25519 proofs), the session table, the gate's wiring and the
 # auth backend, with the ready-made global-role rules (SimpleAccess).
-plexus-login = { path = "../menger/plexus-login", version = "0.2" }
+plexus-login = { path = "../plexus-login", version = "0.2" }
 # plexus-login's login page is an axum 0.8 router.
 axum08 = { package = "axum", version = "0.8" }
 # plexus-jsexec = "0.1.0"  # temporarily disabled - needs API updates
