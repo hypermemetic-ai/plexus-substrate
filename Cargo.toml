@@ -50,23 +50,24 @@ http = "1.0"
 dialectic = { version = "0.4.1", features = ["tokio"] }
 
 cllient = "0.2.1"
-# PLEXUS-6: the plexus 0.6 line by sibling path (menger's MFE-10) — the
-# same graph menger resolves, one of each.
-plexus-macros = { path = "../plexus-macros", version = "0.6" }
-plexus-core = { path = "../plexus-core", version = "0.6" }
+# PLEXUS-26: the plexus 0.7 line by published version (PLEXUS-16) — a clone
+# builds alone, and a program that imports substrate holds one of each.
+plexus-macros = "0.7.0"
+plexus-core = "0.7.0"
 # TETHER-7: claudecode's emitted client (`ClaudeCodeClient<T>`), so a program
 # that imports substrate calls it with substrate's own client.
-plexus-client = { path = "../plexus-macros/plexus-client", version = "0.6" }
+plexus-client = "0.7.0"
 # TRANSPORT-18: the MCP bridge mounted under the login (`with_mcp`) — the one
 # bridge, plexus-transport-mcp's; substrate's own copy, gateway and session
 # table are gone.
-plexus-transport = { path = "../plexus-transport", version = "0.5", features = ["mcp"] }
-plexus-auth-core = { path = "../plexus-auth-core", version = "0.2", features = ["adapters"] }
-# PLEXUS-6: login as menger takes it, from its own sibling checkout
-# (`../plexus-login`, FRAME-4; FRAME-9) — the providers' adapters (`key` for
+plexus-transport = { version = "0.6.0", features = ["mcp"] }
+plexus-auth-core = { version = "0.2.2", features = ["adapters"] }
+# PLEXUS-6: login as menger takes it — the providers' adapters (`key` for
 # agents' Ed25519 proofs), the session table, the gate's wiring and the
 # auth backend, with the ready-made global-role rules (SimpleAccess).
-plexus-login = { path = "../plexus-login", version = "0.2" }
+# PLEXUS-26: by git rev, its public repository's main, until a release: the
+# published 0.2.2 is on the 0.6 line.
+plexus-login = { git = "https://github.com/hypermemetic-ai/plexus-login", rev = "23b9e2c8ba710e78a296091775823760eeab078a" }
 # plexus-login's login page is an axum 0.8 router.
 axum08 = { package = "axum", version = "0.8" }
 # plexus-jsexec = "0.1.0"  # temporarily disabled - needs API updates
@@ -91,8 +92,8 @@ hyper = "1"
 tower = { version = "0.5", features = ["util"] }
 # TRANSPORT-18: an rmcp 3.x client over streamable HTTP for tests/mcp.rs.
 rmcp = { version = "3.8", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
-# TRANSPORT-13: plexus-idp in-process — the authorization server tests/mcp_oauth.rs signs in at.
-plexus-idp = { path = "../plexus-idp" }
+# TRANSPORT-13: tests/mcp_oauth.rs boots plexus-idp in-process; it and this
+# dependency are off until plexus-idp's 0.7 line is public (PLEXUS-24, PLEXUS-34).
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 jsonrpsee = { version = "0.26", features = ["client", "ws-client"] }
 tokio-tungstenite = "0.21"
