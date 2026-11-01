@@ -1,3 +1,9 @@
+// PLEXUS-24, PLEXUS-34: off, not deleted. This test boots plexus-idp in process,
+// and plexus-idp's move to the 0.7 line is not public, so nothing here can name
+// it. It passed against that move on 2026-11-01 (PLEXUS-26). To turn it on: the
+// plexus-idp dev dependency back by git rev, and this gate gone.
+#![cfg(any())]
+
 //! TRANSPORT-13: MCP OAuth end to end — an MCP client is sent to plexus-idp
 //! by substrate's `/mcp`, signs in as a person, and comes back with a token
 //! bound to `/mcp` that the mounted bridge admits and the gate decides on.
